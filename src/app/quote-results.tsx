@@ -1,7 +1,10 @@
 import type { Plan, QuoteResult } from "../domain/schema";
 import { retailers } from "../domain/catalogue";
 import { money, when } from "./api-client";
-import { itemFirstComparison } from "../domain/comparison";
+import {
+  itemFirstComparison,
+  itemsAndShippingEstimate,
+} from "../domain/comparison";
 import { collectionIssues } from "../domain/issues";
 import { listedEstimate } from "../domain/listed-estimate";
 
@@ -56,6 +59,13 @@ export function BasketPlan({ plan, demo }: { plan: Plan; demo: boolean }) {
           ))}
           {!demo && (
             <p className="source-note">
+              {basket.shipping.status === "estimated" &&
+                basket.shipping.chargePaise !== null && (
+                  <>
+                    Estimated shipping before any unconfirmed shipping tax:{" "}
+                    {money(basket.shipping.chargePaise)}.{" "}
+                  </>
+                )}
               {basket.shipping.conditions} · {when(basket.shipping.observedAt)}
             </p>
           )}
@@ -99,6 +109,8 @@ export default function QuoteResults({
       ? next.totalPaise! - recommendation.totalPaise
       : 0;
   const comparison = itemFirstComparison(result.plans, result.recommendedId);
+  const deliveredEstimate =
+    !demo && best && !best.verified ? itemsAndShippingEstimate(best) : null;
   const estimate =
     !demo && !best ? listedEstimate(result.input.parts, result.offers) : null;
   return (
@@ -230,7 +242,7 @@ export default function QuoteResults({
                   {offer.unitsPerPack === 1 ? "" : "s"} / pack ·{" "}
                   {offer.stock.replaceAll("_", " ")}
                   {offer.extractionMethod === "retailer-parser" &&
-                    " · Direct listing read; AI details unverified"}
+                    " · Direct source read"}
                 </small>
               </div>
               <strong>
@@ -251,13 +263,25 @@ export default function QuoteResults({
                   ? "LOWEST COMPLETE SAMPLE"
                   : best.verified
                     ? "VERIFIED LANDED COST"
-                    : "KNOWN ITEM SUBTOTAL"}
+                    : deliveredEstimate
+                      ? "ITEMS + SHIPPING ESTIMATE"
+                      : "KNOWN ITEM SUBTOTAL"}
               </span>
               <p className="quote-total">
                 {best.verified
                   ? money(best.totalPaise)
-                  : money(best.knownSubtotalPaise)}
+                  : money(
+                      deliveredEstimate?.amountPaise ?? best.knownSubtotalPaise,
+                    )}
               </p>
+              {deliveredEstimate && (
+                <p className="muted">
+                  Includes known item tax.{" "}
+                  {deliveredEstimate.shippingTaxUnknown
+                    ? "Shipping tax unconfirmed; additional charges may apply."
+                    : "Shipping estimated; confirm the final amount with the retailer."}
+                </p>
+              )}
             </div>
             <span className="retailer-count">
               {best.baskets.length} retailer

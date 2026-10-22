@@ -11,6 +11,7 @@ import {
 } from "../domain/schema";
 import { matchOffer } from "../domain/matching";
 import { finish } from "../domain/quote";
+import { priceLine } from "../domain/optimizer";
 export { finish } from "../domain/quote";
 import type { AIProvider } from "./ai";
 import { withProductDetails } from "./ai";
@@ -24,28 +25,47 @@ import {
   normalizeObservation,
   preserveObservationTime,
   saveResult,
+  writeForLease,
   type Observation,
 } from "./db";
 import { TinyFishClient, FetchResponse } from "./tinyfish";
-import { groundedOffer, groundedRule } from "./grounding";
+import { groundedOffer } from "./grounding";
 import { validateBasket } from "./shipping";
 import { ProviderAccessError, RunRejectedError } from "./provider-error";
 import { cachedAI } from "./extraction-cache";
 import { observationTtl } from "./snapshot";
 import { NORMALIZATION_VERSION } from "../domain/normalization";
-import { retailerProduct } from "./retailer-product";
-import { CollectionDeadline, collectionWindowMs } from "./deadline";
+import {
+  retailerProduct,
+  hasPublishedQuantityPricing,
+} from "./retailer-product";
+import {
+  CollectionDeadline,
+  collectionWindowMs,
+  waitWithinDeadline,
+} from "./deadline";
+import { LeaseLost, type JobLease } from "./lease";
+import {
+  StorefrontClient,
+  storefrontOrders,
+  storefrontShipping,
+  type StoreProduct,
+} from "./storefront";
+import { productDatasheet } from "./datasheet";
 import {
   checkedOrders,
   verificationCandidates,
   type CheckedOrder,
 } from "./candidates";
 
-const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const orderingUnknown =
   "Price, pack size or ordering constraints could not be established from source evidence.";
 const message = (error: unknown) =>
   error instanceof Error ? error.message : "Collection failed";
+// Originals are immutable. A changed supplemental response on recovery needs
+// its own source record, rather than normalizing new facts against old bytes.
+const supplementalKey = (prefix: string, original: unknown) =>
+  `${prefix}:${createHash("sha256").update(JSON.stringify(original)).digest("hex")}`;
 function evidence(o: Observation, excerpt = ""): Evidence {
   return {
     id: o.id,
@@ -64,6 +84,7 @@ async function pageObservation(
   refresh: boolean,
   tiny: TinyFishClient,
   fetchBatch?: () => Promise<FetchResponse>,
+  lease?: JobLease,
 ): Promise<Observation> {
   const key = `fetch:${url}`;
   const existing = await observation(jobId, key);
@@ -89,8 +110,10 @@ async function pageObservation(
         url,
         "tinyfish-fetch",
         old.original,
+        null,
+        lease,
       );
-      await preserveObservationTime(copy.id, old.id);
+      await preserveObservationTime(copy.id, old.id, lease);
       return { ...copy, retrieved_at: old.retrieved_at };
     }
   }
@@ -103,6 +126,8 @@ async function pageObservation(
     url,
     "tinyfish-fetch",
     original,
+    null,
+    lease,
   );
   if (!fetchBatch)
     await usage(jobId, {
@@ -125,6 +150,7 @@ async function verify(
   pincode: string,
   tiny: TinyFishClient,
   deadline: number,
+  lease?: JobLease,
 ): Promise<{ shipping: ShippingObservation | null; orders: CheckedOrder[] }> {
   if (Date.now() >= deadline) throw new CollectionDeadline();
   const key = `basket:${createHash("sha256").update(basket.key).digest("hex")}`;
@@ -149,7 +175,8 @@ async function verify(
     )
   ).rows[0];
   if (!op) {
-    const inserted = await db().query(
+    const inserted = await writeForLease(
+      lease,
       "INSERT INTO provider_operations(quote_id,operation_key,status,payload) VALUES($1,$2,'initiating',$3) ON CONFLICT DO NOTHING RETURNING *",
       [jobId, key, JSON.stringify({ basketKey: basket.key, pincode })],
     );
@@ -159,13 +186,15 @@ async function verify(
       );
     try {
       const started = await tiny.startBasket(basket, pincode);
-      await db().query(
+      await writeForLease(
+        lease,
         "UPDATE provider_operations SET status='running',run_id=$3,updated_at=now() WHERE quote_id=$1 AND operation_key=$2",
         [jobId, key, started.run_id],
       );
       op = { ...inserted.rows[0], run_id: started.run_id, status: "running" };
     } catch (error) {
-      await db().query(
+      await writeForLease(
+        lease,
         "UPDATE provider_operations SET status=$3,updated_at=now() WHERE quote_id=$1 AND operation_key=$2",
         [
           jobId,
@@ -198,13 +227,19 @@ async function verify(
   while (!run && Date.now() < deadline) {
     const next = await tiny.getRun(op.run_id);
     if (["COMPLETED", "FAILED", "CANCELLED"].includes(next.status)) run = next;
-    else await wait(750);
+    else
+      await waitWithinDeadline(
+        Math.min(750, Math.max(0, deadline - Date.now() - 1)),
+        deadline,
+        lease?.signal,
+      );
   }
   if (!run)
     throw new Error(
       `Shipping run ${op.run_id} is still pending. Retry will recover this run.`,
     );
-  await db().query(
+  await writeForLease(
+    lease,
     "UPDATE provider_operations SET status='complete',result=$3,updated_at=now() WHERE quote_id=$1 AND operation_key=$2",
     [jobId, key, JSON.stringify(run)],
   );
@@ -216,6 +251,7 @@ async function verify(
     "tinyfish-agent",
     run,
     op.run_id,
+    lease,
   );
   await usage(jobId, {
     provider: "tinyfish-agent",
@@ -240,7 +276,7 @@ async function verify(
     );
   const shipping = validateBasket(run.result, basket, pincode, evidence(o));
   const orders = checkedOrders(run.result, basket, evidence(o));
-  await normalizeObservation(o.id, { shipping, orders });
+  await normalizeObservation(o.id, { shipping, orders }, lease);
   return { shipping, orders };
 }
 export async function processQuote(
@@ -248,24 +284,241 @@ export async function processQuote(
   rawInput: unknown,
   tiny?: TinyFishClient,
   suppliedAI?: AIProvider,
+  lease?: JobLease,
+  suppliedStorefront?: StorefrontClient,
 ): Promise<QuoteResult> {
-  // Leave response/persistence headroom around the thirty-second UI target.
+  // Leave response/persistence headroom around the bounded collection window.
   // Expiry yields a truthful partial result, never a verified substitute.
   const deadline = Date.now() + collectionWindowMs();
-  const collector = tiny ?? new TinyFishClient(undefined, undefined, deadline);
+  const collector =
+    tiny ?? new TinyFishClient(undefined, undefined, deadline, lease?.signal);
   const input = QuoteInput.parse(rawInput),
     offers: Offer[] = [],
     rules: ShippingRule[] = [],
     shipping: ShippingObservation[] = [],
     errors: string[] = [];
+  // Injected provider tests use their own storefront transport when needed;
+  // never mix a fixture collector with a real merchant request.
+  const storefront =
+    suppliedStorefront ??
+    (tiny ? undefined : new StorefrontClient(deadline, lease?.signal));
+  const products = new Map<string, StoreProduct>();
+  const orderSources = new Map<string, Evidence>();
+  const productRequests = new Map(
+    input.parts.map((part) => {
+      const entry = catalogue.find((c) => c.id === part.catalogueId)!;
+      const id = `robocraze:${entry.id}`;
+      return [
+        id,
+        storefront
+          ? storefront
+              .product(entry.urls.robocraze)
+              .then(async (product) => {
+                const o = await saveObservation(
+                  jobId,
+                  supplementalKey(`storefront:${entry.id}`, product),
+                  "robocraze",
+                  `${entry.urls.robocraze}.js`,
+                  "storefront-api",
+                  product,
+                  null,
+                  lease,
+                );
+                products.set(id, product);
+                orderSources.set(id, evidence(o, JSON.stringify(product)));
+                return product;
+              })
+              .catch((error) => {
+                if (error instanceof LeaseLost) throw error;
+                lease?.signal.throwIfAborted();
+                errors.push(
+                  `Robocraze: published ordering rules unavailable. ${message(error)}`,
+                );
+                return null;
+              })
+          : Promise.resolve(null),
+      ];
+    }),
+  );
+  const datasheetRequests = new Map(
+    input.parts
+      .filter(
+        (part) =>
+          part.requiredSpecs.some((spec) => spec.key === "pins") && !tiny,
+      )
+      .map((part) => {
+        const entry = catalogue.find((c) => c.id === part.catalogueId)!;
+        const id = `robocraze:${entry.id}`;
+        return [
+          id,
+          productDatasheet(
+            entry.urls.robocraze,
+            "robocraze",
+            part.model,
+            deadline,
+            lease?.signal,
+          )
+            .then(async (result) => {
+              if (!result?.specs.length) return null;
+              const o = await saveObservation(
+                jobId,
+                supplementalKey(`datasheet:${entry.id}`, result),
+                "robocraze",
+                result.sourceUrl,
+                "retailer-datasheet",
+                result,
+                null,
+                lease,
+              );
+              return {
+                ...result,
+                evidence: evidence(
+                  o,
+                  result.specs.map((spec) => spec.excerpt).join("\n"),
+                ),
+              };
+            })
+            .catch((error) => {
+              if (error instanceof LeaseLost) throw error;
+              lease?.signal.throwIfAborted();
+              errors.push(
+                `Robocraze: linked specification could not be read. ${message(error)}`,
+              );
+              return null;
+            }),
+        ];
+      }),
+  );
+  const supplements = Promise.all([
+    ...productRequests.values(),
+    ...datasheetRequests.values(),
+  ]);
+  // Install a rejection handler immediately while source collection runs. The
+  // awaited promise below still propagates lease cancellation to the worker.
+  void supplements.catch(() => {});
+  const addStorefrontOrders = async (offer: Offer): Promise<Offer> => {
+    const product = await productRequests.get(offer.id);
+    const source = orderSources.get(offer.id);
+    const ordered =
+      product && source ? storefrontOrders(offer, product, source) : offer;
+    const datasheet = await datasheetRequests.get(offer.id);
+    return datasheet
+      ? {
+          ...ordered,
+          specs: [
+            ...ordered.specs,
+            ...datasheet.specs.map(({ key, value }) => ({ key, value })),
+          ],
+          evidence: [...ordered.evidence, datasheet.evidence],
+        }
+      : ordered;
+  };
   const ai =
     suppliedAI ??
     cachedAI(
-      createAIProvider((u) => usage(jobId, u), deadline),
+      createAIProvider((u) => usage(jobId, u), deadline, lease?.signal),
       input.refresh,
     );
+  const seen = new Set<string>();
+  const limit = Math.min(
+    3,
+    Math.max(1, Number(process.env.MAX_BROWSER_CHECKS) || 3),
+  );
+  let checks = 0;
+  let verificationRejected = false;
+  async function checkBasket(basket: Basket) {
+    if (seen.has(basket.key) || checks >= limit || verificationRejected) return;
+    if (Date.now() >= deadline) {
+      if (
+        !errors.includes(
+          "Basket verification time budget reached. Resume saved runs rather than starting duplicates.",
+        )
+      )
+        errors.push(
+          "Basket verification time budget reached. Resume saved runs rather than starting duplicates.",
+        );
+      return;
+    }
+    seen.add(basket.key);
+    checks++;
+    await phase(
+      jobId,
+      `Checking quantities, delivery and shipping (${checks} of ${limit})`,
+      lease,
+    );
+    try {
+      const inspected = await verify(
+        jobId,
+        basket,
+        input.pincode,
+        collector,
+        deadline,
+        lease,
+      );
+      if (inspected.shipping) shipping.push(inspected.shipping);
+      for (const order of inspected.orders) {
+        const index = offers.findIndex((offer) => offer.id === order.offerId);
+        if (index < 0) continue;
+        const offer = offers[index];
+        if (
+          (offer.minPacks !== null && offer.minPacks !== order.minPacks) ||
+          (offer.multiplePacks !== null &&
+            offer.multiplePacks !== order.multiplePacks)
+        ) {
+          offers[index] = {
+            ...offer,
+            match: "insufficient_information",
+            orderingConflict: true,
+            reasons: [
+              ...offer.reasons,
+              "Published and browser-observed ordering constraints conflict.",
+            ],
+            evidence: [...offer.evidence, order.evidence],
+          };
+        } else
+          offers[index] = {
+            ...offer,
+            minPacks: order.minPacks,
+            multiplePacks: order.multiplePacks,
+            evidence: [...offer.evidence, order.evidence],
+          };
+        const source = offers[index].evidence.find(
+          (source) => source.method === "tinyfish-fetch",
+        );
+        if (
+          offers[index].unitsPerPack &&
+          offers[index].minPacks &&
+          offers[index].multiplePacks &&
+          offers[index].priceBreaks.length
+        )
+          offers[index].reasons = offers[index].reasons.filter(
+            (reason) => reason !== orderingUnknown,
+          );
+        if (source)
+          await normalizeObservation(
+            source.observationId,
+            offers[index],
+            lease,
+          );
+      }
+    } catch (error) {
+      if (error instanceof LeaseLost) throw error;
+      lease?.signal.throwIfAborted();
+      errors.push(`${retailers[basket.retailer].name}: ${message(error)}`);
+      if (
+        error instanceof ProviderAccessError ||
+        error instanceof RunRejectedError
+      )
+        verificationRejected = true;
+    }
+    await saveResult(
+      jobId,
+      finish(input, offers, rules, shipping, errors),
+      lease,
+    );
+  }
   let accessFailure: ProviderAccessError | null = null;
-  await phase(jobId, "Collecting product pages and shipping policies");
+  await phase(jobId, "Collecting product pages and shipping policies", lease);
   // One Fetch batch per retailer; per-URL failures remain distinct. At most two
   // batches run at once. Cached pages and saved runs are reused on resumption.
   await Promise.all(
@@ -340,6 +593,8 @@ export async function processQuote(
                 url,
                 "tinyfish-fetch",
                 original,
+                null,
+                lease,
               ),
             ),
           );
@@ -358,6 +613,7 @@ export async function processQuote(
                 input.refresh,
                 collector,
                 fetchBatch,
+                lease,
               );
               if (
                 o.normalized &&
@@ -388,29 +644,39 @@ export async function processQuote(
                 return;
               }
               const preliminary = retailerProduct(page.text, retailer);
+              let sourceComplete = false;
               if (preliminary) {
-                const offer = matchOffer(part, {
-                  ...groundedOffer(
-                    preliminary,
-                    page.text,
-                    { ...evidence(o), sourceUrl: page.final_url },
-                    retailer,
-                    part.id,
-                    `${retailer}:${entry.id}`,
-                  ),
-                  extractionMethod: "retailer-parser",
-                });
+                const offer = matchOffer(
+                  part,
+                  await addStorefrontOrders({
+                    ...groundedOffer(
+                      preliminary,
+                      page.text,
+                      { ...evidence(o), sourceUrl: page.final_url },
+                      retailer,
+                      part.id,
+                      `${retailer}:${entry.id}`,
+                    ),
+                    extractionMethod: "retailer-parser",
+                  }),
+                );
                 const index = offers.findIndex(
                   (current) => current.id === offer.id,
                 );
                 if (index < 0) offers.push(offer);
                 else offers[index] = offer;
-                await normalizeObservation(o.id, offer);
+                const priced = priceLine(part, offer);
+                sourceComplete =
+                  priced !== null && priced.payablePaise !== null;
+                await normalizeObservation(o.id, offer, lease);
                 await saveResult(
                   jobId,
                   finish(input, offers, rules, shipping, errors),
+                  lease,
                 );
               }
+              if (sourceComplete && !hasPublishedQuantityPricing(page.text))
+                return;
               const ex =
                 preliminary && ai.productDetails
                   ? withProductDetails(
@@ -425,13 +691,15 @@ export async function processQuote(
                   : await ai.product(page.text, page.final_url, part.model);
               const offer = matchOffer(
                 part,
-                groundedOffer(
-                  ex,
-                  page.text,
-                  { ...evidence(o), sourceUrl: page.final_url },
-                  retailer,
-                  part.id,
-                  `${retailer}:${entry.id}`,
+                await addStorefrontOrders(
+                  groundedOffer(
+                    ex,
+                    page.text,
+                    { ...evidence(o), sourceUrl: page.final_url },
+                    retailer,
+                    part.id,
+                    `${retailer}:${entry.id}`,
+                  ),
                 ),
               );
               if (
@@ -442,7 +710,7 @@ export async function processQuote(
               )
                 offer.reasons.push(orderingUnknown);
               offer.extractionMethod = "ai";
-              await normalizeObservation(o.id, offer);
+              await normalizeObservation(o.id, offer, lease);
               const index = offers.findIndex(
                 (current) => current.id === offer.id,
               );
@@ -451,8 +719,11 @@ export async function processQuote(
               await saveResult(
                 jobId,
                 finish(input, offers, rules, shipping, errors),
+                lease,
               );
             } catch (error) {
+              if (error instanceof LeaseLost) throw error;
+              lease?.signal.throwIfAborted();
               if (error instanceof ProviderAccessError) {
                 accessFailure = error;
                 return;
@@ -463,6 +734,61 @@ export async function processQuote(
             }
           }),
         );
+        if (retailer === "robocraze" && storefront) {
+          const candidate = verificationCandidates(
+            input,
+            offers.filter((offer) => offer.retailer === retailer),
+            rules,
+          )[0]?.baskets[0];
+          if (candidate && Date.now() < deadline) {
+            try {
+              const inspected = await storefront.shipping(
+                candidate,
+                input.pincode,
+                products,
+              );
+              const o = await saveObservation(
+                jobId,
+                supplementalKey("storefront-basket", {
+                  basketKey: candidate.key,
+                  inspected,
+                }),
+                retailer,
+                retailers[retailer].cartUrl,
+                "storefront-api",
+                inspected,
+                null,
+                lease,
+              );
+              const observed = storefrontShipping(
+                candidate,
+                inspected,
+                evidence(o, JSON.stringify(inspected)),
+              );
+              shipping.push(observed);
+              await normalizeObservation(o.id, observed, lease);
+              await saveResult(
+                jobId,
+                finish(input, offers, rules, shipping, errors),
+                lease,
+              );
+            } catch (error) {
+              if (error instanceof LeaseLost) throw error;
+              lease?.signal.throwIfAborted();
+              errors.push(
+                `Robocraze: storefront shipping estimate unavailable. ${message(error)}`,
+              );
+            }
+          }
+        }
+        // A complete retailer basket can be checked while another retailer is
+        // still collecting. The shared budget and seen keys prevent duplicates.
+        const candidate = verificationCandidates(
+          input,
+          offers.filter((offer) => offer.retailer === retailer),
+          rules,
+        )[0]?.baskets[0];
+        if (candidate) await checkBasket(candidate);
       };
       const collectPolicy = async () => {
         if (accessFailure) return;
@@ -474,6 +800,7 @@ export async function processQuote(
             input.refresh,
             collector,
             fetchBatch,
+            lease,
           );
           if (
             o.normalized &&
@@ -495,15 +822,28 @@ export async function processQuote(
             throw new Error(
               "Retailer returned a placeholder rather than an applicable shipping policy.",
             );
-          const rule = groundedRule(
-            await ai.policy(page.text, input.pincode),
-            page.text,
-            evidence(o),
+          // Policy text is useful evidence, but a national banner cannot prove
+          // destination applicability or a final shipping charge. Keep it out
+          // of the model critical path; only exact-cart observations qualify.
+          const rule: ShippingRule = {
             retailer,
-          );
-          await normalizeObservation(o.id, rule);
+            basis: "unknown",
+            thresholdPaise: null,
+            comparison: "gte",
+            belowChargePaise: null,
+            aboveChargePaise: null,
+            taxStatus: "unknown",
+            taxRateBps: null,
+            applicable: false,
+            conditions:
+              "Retailer policy captured. Exact destination and cart shipping still require verification.",
+            evidence: [evidence(o, page.text.slice(0, 3000))],
+          };
+          await normalizeObservation(o.id, rule, lease);
           rules.push(rule);
         } catch (error) {
+          if (error instanceof LeaseLost) throw error;
+          lease?.signal.throwIfAborted();
           if (error instanceof ProviderAccessError) {
             accessFailure = error;
             return;
@@ -518,113 +858,16 @@ export async function processQuote(
       await Promise.all([collectProducts(), collectPolicy()]);
     }),
   );
+  await supplements;
   if (accessFailure) throw accessFailure;
   // Stable order keeps plan IDs and recovery keys reproducible across worker restarts.
   offers.sort((a, b) => a.id.localeCompare(b.id));
-  let result = finish(input, offers, rules, shipping, errors);
-  await saveResult(jobId, result);
-  const shortlist = verificationCandidates(input, offers, rules),
-    seen = new Set<string>();
-  const limit = Math.min(
-    3,
-    Math.max(1, Number(process.env.MAX_BROWSER_CHECKS) || 3),
+  await saveResult(
+    jobId,
+    finish(input, offers, rules, shipping, errors),
+    lease,
   );
-  let checks = 0;
-  const verificationDeadline = Math.min(deadline, Date.now() + 45000);
-  verification: for (const plan of shortlist) {
-    for (const basket of plan.baskets) {
-      if (seen.has(basket.key) || checks >= limit) continue;
-      if (Date.now() >= verificationDeadline) {
-        errors.push(
-          "Basket verification time budget reached. Resume saved runs rather than starting duplicates.",
-        );
-        break verification;
-      }
-      seen.add(basket.key);
-      checks++;
-      await phase(
-        jobId,
-        `Checking quantities, delivery and shipping (${checks} of ${limit})`,
-      );
-      try {
-        const inspected = await verify(
-          jobId,
-          basket,
-          input.pincode,
-          collector,
-          verificationDeadline,
-        );
-        if (inspected.shipping) shipping.push(inspected.shipping);
-        for (const order of inspected.orders) {
-          const index = offers.findIndex((offer) => offer.id === order.offerId);
-          if (index < 0) continue;
-          const offer = offers[index];
-          if (
-            (offer.minPacks !== null && offer.minPacks !== order.minPacks) ||
-            (offer.multiplePacks !== null &&
-              offer.multiplePacks !== order.multiplePacks)
-          ) {
-            offers[index] = {
-              ...offer,
-              match: "insufficient_information",
-              orderingConflict: true,
-              reasons: [
-                ...offer.reasons,
-                "Published and browser-observed ordering constraints conflict.",
-              ],
-              evidence: [...offer.evidence, order.evidence],
-            };
-          } else
-            offers[index] = {
-              ...offer,
-              minPacks: order.minPacks,
-              multiplePacks: order.multiplePacks,
-              evidence: [...offer.evidence, order.evidence],
-            };
-          const source = offers[index].evidence.find(
-            (source) => source.method === "tinyfish-fetch",
-          );
-          if (
-            offers[index].unitsPerPack &&
-            offers[index].minPacks &&
-            offers[index].multiplePacks &&
-            offers[index].priceBreaks.length
-          )
-            offers[index].reasons = offers[index].reasons.filter(
-              (reason) => reason !== orderingUnknown,
-            );
-          if (source)
-            await normalizeObservation(source.observationId, offers[index]);
-        }
-      } catch (error) {
-        errors.push(`${retailers[basket.retailer].name}: ${message(error)}`);
-        if (
-          error instanceof ProviderAccessError ||
-          error instanceof RunRejectedError
-        )
-          break verification;
-      }
-      result = finish(input, offers, rules, shipping, errors);
-      await saveResult(jobId, result);
-    }
-  }
-  await phase(jobId, "Explaining the checked options");
-  result = finish(input, offers, rules, shipping, errors);
-  if (!result.recommendedId) return result;
-  try {
-    const facts = [
-      result.explanation,
-      `${result.coverage.covered} of ${result.coverage.requested} requested lines have eligible priced offers.`,
-      `${result.plans.filter((p) => p.verified).length} of ${result.plans.length} generated plans have a fully verified total.`,
-      "Missing shipping, stock and tax details remain unknown; retailer prices can change.",
-    ];
-    result.explanation = (await ai.explain(facts)) || facts.join(" ");
-    result.explanationSource =
-      ai.provider === "gemini" ? "gemini-validated" : "openai-validated";
-  } catch {
-    result.errors.push(
-      "The recommendation explanation used validated local facts because the AI explanation was unavailable.",
-    );
-  }
-  return result;
+  for (const plan of verificationCandidates(input, offers, rules))
+    for (const basket of plan.baskets) await checkBasket(basket);
+  return finish(input, offers, rules, shipping, errors);
 }

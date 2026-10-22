@@ -49,8 +49,9 @@ export default function EvidenceView({
         )}
       </div>
       <p>
-        Live quotes retain the original TinyFish responses, normalized
-        observations, browser run IDs and reported model usage.
+        Live quotes retain retailer API responses, linked datasheet text,
+        TinyFish responses, normalized observations, browser run IDs and
+        reported model usage. Guest-cart cookies and tokens are excluded.
       </p>
       {!jobId && !data && !busy ? (
         <div className="empty-panel">
@@ -146,7 +147,7 @@ export default function EvidenceView({
                   <th>Model</th>
                   <th>Input tokens</th>
                   <th>Output tokens</th>
-                  <th>Response time</th>
+                  <th>Recorded at</th>
                   <th>Provider request ID</th>
                 </tr>
               </thead>

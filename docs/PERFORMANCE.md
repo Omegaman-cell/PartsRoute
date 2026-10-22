@@ -1,40 +1,53 @@
-# Response time and live verification
+# Fresh quote performance
 
-**Current target: thirty seconds.** The latest bounded-window operator test returned fresh partial results over public HTTP in 26.46 seconds. It did not return a verified delivered plan; the strict test still failed. The previous public run without the shared window took 54 seconds. See [current implementation and measurements](COLLECTOR-UPDATE.md). The seven- and ten-second measurements below are historical. The interface's old ten-second deadline warning has been removed as requested; timers and unknown costs remain visible.
+Original performance target: **a complete, newly collected, verified purchasing plan within 10 seconds**. The user subsequently prioritized delivery and removed ten seconds as a release blocker. This remains an optional strict benchmark: queue acknowledgement, item-only coverage, shipping estimates, synthetic calculations and saved observations do not pass it.
 
-PartsRoute separates two operations:
+## Local measurement — 22 October 2026
 
-| Operation                   | What happens                                                                          | Timing commitment                                                                         |
-| --------------------------- | ------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
-| Collect & compare fresh offers | New TinyFish Fetch, new Gemini extraction and bounded TinyFish Agent checks | Primary action. Must be measured through a complete verified result; seven-second requirement has not passed |
-| View saved observations | PostgreSQL reads, current specification matching and deterministic basket calculation | Explicit cache-only view; its timings do not qualify |
+The real configured providers, PostgreSQL worker and protected HTTP API processed quote `56233eb4-3367-4dfb-b9c9-50308307cb8c`. The input was the unchanged three-line sample BOM, pincode 560001, `mode=live`, `refresh=true`.
 
-`POST /api/comparisons` is protected and read-only. It never creates a job or calls a provider, including on a cache miss. A miss asks the user to refresh explicitly. The browser aborts API requests after six seconds and shows an actionable error. This timeout is not a guarantee of a successful result.
+| Measured event                                                                         | Elapsed from HTTP submission |
+| -------------------------------------------------------------------------------------- | ---------------------------: |
+| All three product lines eligible, with known item prices/tax and published order rules |                     5,313 ms |
+| Exact guest-cart shipping estimate displayed                                           |                     7,464 ms |
+| Strict complete-quote deadline                                                         | 10,007 ms observed; **FAIL** |
+| Server terminal partial status                                                         |                    26,320 ms |
 
-Every cached comparison shows the oldest product observation and missing pages. The default product cache lifetime is 15 minutes, configurable up to one hour; this local validation used a one-hour window after the final restart. Expired observations, obsolete normalizations and synthetic fixtures are excluded. A newer changed or failed source is not hidden behind an older success. Specification changes are re-matched, quantities are recalculated, and shipping is usable only for the exact basket and pincode. Unknown ordering constraints and shipping remain unknown.
+The estimate was INR 49.00, with shipping tax unknown. No delivered recommendation was emitted. Robu's batch returned four per-URL timeout errors. A TinyFish basket run was started and persisted; it was still pending at the collection deadline. The full report is `artifacts/live-budget.json` in the local test workspace; it contains no API keys. These are single-run observations, not p95 performance or an uptime guarantee.
 
-One batched Fetch request retrieves up to five product pages and one policy per retailer. At most two retailer batches run concurrently. Fetch has a 30-second per-URL limit and a 65-second HTTP timeout. The Gemini default is `gemini-3.5-flash-lite`, with minimal thinking, no artificial 12-second interval, a 30-second per-attempt timeout, one retry for 502/503/504 and a per-job outage gate. There is no paid fallback. Successful structured extraction is cached by source content, requested model, provider model and prompt version. Grounding has a separate version. Sources retain their original observation times.
+The earlier local run on this revision already reached 3/3 eligible product lines, but waited for policy/model work and the second retailer until the shared window expired. The original baseline had 0/3 purchase-ready lines and no verified shipping.
 
-## Measurements on 20 October 2026
+## Changes affecting latency
 
-The first ten local HTTP comparisons completed in **13.47–386.53 ms**, with a **19.41 ms** median. A final ten-request batch after the provenance fixes completed in **10.79–301.95 ms**, median **17.92 ms**, with zero new jobs or provider-usage records. A browser comparison displayed **0.15 s**. These were real cached retailer observations with **zero purchase-ready lines** because ordering/specification/shipping gaps remain. Fast partial data does not prove a complete live quote.
+- Read explicit listing facts deterministically; call the model only for unresolved facts or published quantity pricing.
+- Read published SKU-specific quantity rules from Shopify Ajax and require agreement with listing prices.
+- Retrieve and parse the retailer-linked datasheet in parallel. Actual pin-count and voltage extraction took about 1.5 seconds, avoiding an image-model probe that took about 7.4 seconds.
+- Capture shipping policies as evidence without calling a model for a national rule that cannot establish basket/pincode applicability.
+- Start a complete retailer's basket verification while another retailer is still collecting.
+- Request an exact guest-cart shipping estimate while preserving unknown tax and final-total status.
+- Bound per-URL collection time so one slow page does not discard successful batch entries. Expiry still produces a partial result, not a speed pass.
+- Omit optional model-written explanations from the critical path; use deterministic facts and arithmetic.
 
-Real Flash-Lite extraction calls took **3.0–17.2 seconds**, and another call timed out. A saved-page recheck took **89.8 seconds** overall. These observations rule out claiming a guaranteed seven-second cold collection. No public-network latency or hosted-backend benchmark has passed.
+## Reproduce the strict check
 
-To reproduce, warm observations once using the live worker or `pnpm validate:live 560001` with the worker stopped, then run `pnpm benchmark:http`. It makes ten read-only comparisons, writes `artifacts/http-latency.json`, and fails if any response exceeds seven seconds. It refuses to create new collection jobs on a cache miss. Keep these measurements separate from the synthetic calculator, which requires no APIs.
+Start the local database, production web server and worker with private credentials, then:
 
-The mentor explicitly requires every **new, fully verified live basket** within seven seconds. The current external workflow does **not** meet that requirement. Pre-collected evidence does not qualify.
+```sh
+pnpm benchmark:live-budget --follow
+```
 
-## Freshness correction
+The script submits to the ordinary protected HTTP endpoint with a new idempotency key, forces refresh, polls the same job, and fails unless terminal status is complete with a verified full-coverage plan inside 10,000 ms. Follow-up diagnostics never change the deadline verdict. It separately records the first complete product coverage and the first shipping estimate.
 
-The original primary button read cached observations. It now starts `POST /api/quotes`, which forces refresh=true even if an older client sends false. New quote jobs bypass both PostgreSQL page reuse and content-based AI reuse; TinyFish receives ttl=0 and the AI provider is called again. Retries and refresh recovery still reuse the same job's saved work to avoid duplicate provider charges. A separate View saved observations button is the only UI cache path. Queue acceptance is no longer displayed as the fresh output duration. The full timer continues until terminal status, and the UI flags a missed seven-second deadline. Worker pickup delay was reduced from two seconds to 250 ms. TinyFish response records now include actual elapsed request time; Evidence also displays provider request IDs and response-record timestamps.
+`--local-submit` is an explicit operator diagnostic using the same database queue and HTTP polling; reports label that submission path. Do not use it to describe an ordinary browser benchmark.
 
-`pnpm benchmark:live-budget --follow` retains the seven-second verdict and optionally follows the same saved job to terminal status, recording provider call IDs/timings without creating another job. It consumes provider quota once; later completion cannot turn a failed deadline into a pass.
+`pnpm benchmark:http` measures only the separate saved-data endpoint. Its earlier millisecond timings do not meet the fresh-quote requirement.
 
-The corrected fresh endpoint was tested through the public tunnel on 20 October 2026: quote `b7379c68-e973-44b0-a86c-3999a4adcbaf` was still processing at 7007.5 ms and later finished partial, after about 152 seconds on the server. Two new TinyFish Fetch responses took **15,771 ms** and **17,802 ms**. Four new Gemini responses took **24,848–29,958 ms**, with actual token usage recorded; a subsequent extraction timed out. Four offers were extracted, but no complete verified plan qualified. Thus even Fetch alone exceeded the requirement in this run. This is a failed performance result, not a seven-second workaround. [Sanitised full report](evidence/fresh-cache-bypass-2026-10-20.json). Provider request IDs were not returned in these responses and remain null.
+## External blockers
 
-After this check, batch persistence was also corrected: every fetched URL is saved before model work starts, preserving response-time provenance and preventing model failures from leaving collected pages unsaved. Its regression path was tested with mocked providers; no additional paid live run was made for this persistence-only change.
+Robu collection currently times out or encounters retailer blocking. Robocraze's public estimator returns rates but no shipping-tax inclusion or final checkout total; automated checkout access returned HTTP 403 during qualification. The app neither bypasses that block nor assumes shipping tax is zero. A genuine complete-quote pass still requires resolving these facts and repeating the same strict benchmark.
 
-## Executed strict fresh-quote check
+## Tax-aware API qualification
 
-`pnpm benchmark:live-budget` was executed on 20 October 2026 against the real local application with refresh=true. Quote `95324b58-c54e-478b-9a0c-181b2012252f` was still processing when the 7000 ms deadline elapsed (reported wall time 7002.51 ms). No complete verified plan had returned, so the check **failed**. The saved job continued; no automatic duplicate was created. Evidence: [strict budget report](evidence/fresh-seven-second-budget-2026-10-20.json). Connecting the public preview does not change this result.
+The retailer's publicly published Shopify Storefront endpoint was also tested with one isolated guest cart, the unchanged BOM and the same destination. It returned INR 297 in about 2.4 seconds, but explicitly reported `totalAmountEstimated=true`, `totalTaxAmount=null`, and `totalTaxAmountEstimated=true`. The supplied country/state/pincode were retained correctly. This was a research probe, not a production speed pass or a verified total.
+
+Shopify's [tax deprecation notice](https://shopify.dev/changelog/posts/tax-and-duties-are-deprecated-in-storefront-cart-api) states that tax and duties are finalized at checkout. The retailer's shipping policy and FAQ did not provide an explicit shipping-tax inclusion rule. This confirms that the missing tax fact cannot be supplied by switching to a faster model. The production app continues to keep the complete delivered total unknown.

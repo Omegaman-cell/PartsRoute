@@ -12,7 +12,6 @@ import {
   liveAvailable,
   repository,
   requestApi,
-  staticSite,
   temporaryBackend,
 } from "./api-client";
 import QuoteResults from "./quote-results";
@@ -30,6 +29,7 @@ type Job = {
   phase: string;
   result: QuoteResult | null;
   errors: string[];
+  attempts?: number;
 };
 type Status = {
   ready: boolean;
@@ -135,7 +135,28 @@ export default function Workspace() {
     );
     requestId.current = null;
   }
+  function addPart() {
+    const entry = catalogue.find(
+      (item) => !parts.some((part) => part.catalogueId === item.id),
+    );
+    if (!entry) return;
+    setParts((current) => [
+      ...current,
+      {
+        id: crypto.randomUUID(),
+        catalogueId: entry.id,
+        name: entry.name,
+        model: entry.model,
+        quantity: 1,
+        requiredSpecs: entry.specs.map((spec) => ({ ...spec })),
+        equivalentAcceptable: false,
+        confirmedOfferIds: [],
+      },
+    ]);
+    requestId.current = null;
+  }
   function switchMode(next: "demo" | "live") {
+    if (next === mode) return;
     cancelPolling();
     setMode(next);
     const sample = QuoteInput.safeParse({
@@ -305,12 +326,7 @@ export default function Workspace() {
     );
     try {
       if (mode === "demo") {
-        const sample = staticSite
-          ? (await import("../domain/demo")).demoQuote(parsed.data)
-          : ((await requestApi("/api/demo", "", {
-              method: "POST",
-              body: JSON.stringify(parsed.data),
-            })) as QuoteResult);
+        const sample = demoQuote(parsed.data);
         if (version !== generation.current) return;
         setResult(sample);
         setJob(null);
@@ -358,13 +374,17 @@ export default function Workspace() {
   }
   async function retry() {
     if (!job) return;
+    cancelPolling();
+    const version = generation.current;
+    setBusy(true);
     setError("");
     try {
       await requestApi(`/api/quotes/${job.id}`, token, { method: "POST" });
-      cancelPolling();
-      setBusy(true);
-      await poll(job.id, generation.current);
+      if (version !== generation.current) return;
+      await poll(job.id, version);
     } catch (caught) {
+      if (version !== generation.current) return;
+      setBusy(false);
       setError(caught instanceof Error ? caught.message : "Retry failed.");
     }
   }
@@ -372,30 +392,31 @@ export default function Workspace() {
     setView("evidence");
     if (!job && !result?.dataStatus) return;
     setEvidenceBusy(true);
+    const version = generation.current;
     try {
-      setEvidence(
-        job
-          ? await requestApi(`/api/quotes/${job.id}/evidence`, token)
-          : await requestApi("/api/observations", token, {
-              method: "POST",
-              body: JSON.stringify(
-                [
-                  ...new Set(
-                    [
-                      ...result!.offers.flatMap((o) => o.evidence),
-                      ...result!.shipping.flatMap((s) => s.evidence),
-                    ].map((e) => e.observationId),
-                  ),
-                ].slice(0, 20),
-              ),
-            }),
-      );
+      const loaded = job
+        ? await requestApi(`/api/quotes/${job.id}/evidence`, token)
+        : await requestApi("/api/observations", token, {
+            method: "POST",
+            body: JSON.stringify(
+              [
+                ...new Set(
+                  [
+                    ...result!.offers.flatMap((o) => o.evidence),
+                    ...result!.shipping.flatMap((s) => s.evidence),
+                  ].map((e) => e.observationId),
+                ),
+              ].slice(0, 20),
+            ),
+          });
+      if (version === generation.current) setEvidence(loaded);
     } catch (caught) {
+      if (version !== generation.current) return;
       setError(
         caught instanceof Error ? caught.message : "Cannot load evidence.",
       );
     } finally {
-      setEvidenceBusy(false);
+      if (version === generation.current) setEvidenceBusy(false);
     }
   }
   const stale = Boolean(
@@ -475,7 +496,9 @@ export default function Workspace() {
             <Icon name="info" />
             <span>
               <strong>Calculator example.</strong> Edit the quantities to see
-              how shipping changes the best basket. Prices here are synthetic.
+              how shipping changes the best basket. Prices and shipping are
+              synthetic. This runs instantly with no live fetching or pincode
+              lookup.
             </span>
           </div>
         )}
@@ -528,7 +551,7 @@ export default function Workspace() {
                 {!liveAvailable ? (
                   <>
                     <p>
-                      This GitHub Pages site hosts the sample calculator. Live
+                      This hosted demo runs the sample calculator. Live
                       quotes need the server application, a database and a
                       worker. TinyFish and AI provider keys belong on that
                       server.
@@ -545,8 +568,9 @@ export default function Workspace() {
                 ) : (
                   <>
                     <p>
-                      Collect new product pages and request new AI extraction.
-                      The timer measures the full quote, including verification.
+                      Collect current retailer prices and check the complete
+                      basket. The timer includes product and shipping
+                      verification.
                     </p>
                     {apiBase && (
                       <p className="source-note">
@@ -699,7 +723,15 @@ export default function Workspace() {
                             }}
                           >
                             {catalogue.map((entry) => (
-                              <option key={entry.id} value={entry.id}>
+                              <option
+                                key={entry.id}
+                                value={entry.id}
+                                disabled={parts.some(
+                                  (other) =>
+                                    other.id !== part.id &&
+                                    other.catalogueId === entry.id,
+                                )}
+                              >
                                 {entry.name}
                               </option>
                             ))}
@@ -711,6 +743,20 @@ export default function Workspace() {
                               </span>
                             ))}
                           </div>
+                          {parts.length > 1 && (
+                            <button
+                              className="text-button"
+                              type="button"
+                              onClick={() => {
+                                setParts((current) =>
+                                  current.filter((item) => item.id !== part.id),
+                                );
+                                requestId.current = null;
+                              }}
+                            >
+                              Remove component
+                            </button>
+                          )}
                           <details className="attributes-editor">
                             <summary>Edit matching requirements</summary>
                             <div className="attribute-fields">
@@ -848,6 +894,15 @@ export default function Workspace() {
                         </label>
                       </article>
                     ))}
+                    {parts.length < catalogue.length && (
+                      <button
+                        className="secondary"
+                        type="button"
+                        onClick={addPart}
+                      >
+                        Add component
+                      </button>
+                    )}
                     <div className="delivery-row">
                       <label htmlFor="pincode">
                         Delivery pincode
@@ -864,7 +919,11 @@ export default function Workspace() {
                           }}
                         />
                       </label>
-                      <p>One destination for every retailer basket.</p>
+                      <p>
+                        {mode === "demo"
+                          ? "Sample shipping stays fixed for any example pincode. Use Live quote for a real delivery check."
+                          : "One destination for every retailer basket."}
+                      </p>
                     </div>
                     <button
                       className="primary"
@@ -956,10 +1015,12 @@ export default function Workspace() {
                 )}
                 {mode === "live" && collectionClock && (
                   <>
-                    <p className="response-note">
+                    <p className="response-note" aria-live="off">
                       {collectionClock.recovered
                         ? collectionClock.finished
-                          ? "Saved quote duration"
+                          ? (job?.attempts ?? 1) > 1
+                            ? "Saved job lifetime (includes recovery pauses)"
+                            : "Saved quote duration"
                           : "Resumed collection"
                         : "Fresh collection"}{" "}
                       · {(collectionClock.elapsedMs / 1000).toFixed(1)} s
@@ -1011,7 +1072,7 @@ export default function Workspace() {
                         {mode === "live"
                           ? job?.status === "failed"
                             ? "Review the error above. Any pages already collected remain saved with this quote; open Evidence to inspect them before retrying."
-                            : "The main button starts new TinyFish requests and new AI extraction. Saved observations are available through a separate link and are never counted as a fresh quote."
+                            : "The main button collects current retailer data. Saved observations are available separately and are never counted as a fresh quote."
                           : "Calculate this three-part prototype to compare complete baskets, including shipping once per retailer."}
                       </p>
                       <div className="empty-breakdown">
@@ -1044,8 +1105,11 @@ export default function Workspace() {
                       <button
                         className="secondary"
                         onClick={() => void retry()}
+                        disabled={(job.attempts ?? 0) >= 3}
                       >
-                        Retry saved work
+                        {(job.attempts ?? 0) >= 3
+                          ? "Retry limit reached"
+                          : "Retry saved work"}
                       </button>
                       <button
                         className="text-button"

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { catalogue } from "./catalogue";
 
 export const Retailer = z.enum(["robu", "robocraze"]);
 export type Retailer = z.infer<typeof Retailer>;
@@ -9,7 +10,7 @@ export const Spec = z.object({
 });
 export const PartRequest = z.object({
   id: z.string().min(1).max(50),
-  catalogueId: z.enum(["hcsr04", "dht11", "breadboard400"]),
+  catalogueId: z.enum(catalogue.map((part) => part.id)),
   name: z.string().min(1).max(120),
   model: z.string().min(1).max(80),
   quantity: z.number().int().min(1).max(100),
@@ -20,7 +21,7 @@ export const PartRequest = z.object({
 export type PartRequest = z.infer<typeof PartRequest>;
 export const QuoteInput = z
   .object({
-    parts: z.array(PartRequest).min(3).max(5),
+    parts: z.array(PartRequest).min(1).max(catalogue.length),
     pincode: z
       .string()
       .regex(/^[1-9][0-9]{5}$/, "Enter a six-digit Indian pincode"),
@@ -44,7 +45,13 @@ export const Evidence = z.object({
   sourceUrl: z.url(),
   retrievedAt: z.iso.datetime(),
   excerpt: z.string(),
-  method: z.enum(["tinyfish-fetch", "tinyfish-agent", "synthetic-fixture"]),
+  method: z.enum([
+    "tinyfish-fetch",
+    "tinyfish-agent",
+    "storefront-api",
+    "retailer-datasheet",
+    "synthetic-fixture",
+  ]),
   runId: z.string().nullable(),
   observationId: z.string(),
 });

@@ -1,21 +1,26 @@
-# A credible PartsRoute demonstration
+# Hackathon demo walkthrough
 
-Lead with the purchasing decision, then show the evidence supporting it. The sample demonstrates the arithmetic; it must not be presented as current retailer pricing or proof of live collection.
+Run the local production app and worker using [local setup](LIVE-SETUP.md). Use the current local app, not a historical screenshot or an expired tunnel URL.
 
-1. Open the sample. Explain the three requirements and exact attributes. Show the computed ₹225 item-first basket becoming ₹345 after two shipping charges, while one retailer's ₹255 basket totals ₹295.
-2. Change a quantity. Point out the stale-result notice and recalculate; all totals come from the same pack/tax/shipping calculator.
-3. Open a product's matching details. Explain how a bare DHT11 sensor differs from an external sensor module, why a wrong connector would be rejected and why confirmation cannot override contradictions.
-4. Choose Live quote and check the connection. Use Collect & compare fresh offers to run one quote. Inspect source URLs, new retrieval times, original Fetch responses, provider request IDs, model usage and Agent run IDs in Evidence. The main action bypasses both page and model caches. Do not substitute saved observations or the Pages sample for this step.
-5. Show one complete, independently calculated live landed total **only after** extraction, quantity constraints and exact-basket shipping actually pass. If they do not, state the blocker and demonstrate the honest partial/failure state.
+## Five-minute walkthrough
 
-## Current evidence and gaps
+1. Start in **Sample calculation**. Explain that its prices are synthetic, chosen to demonstrate the purchasing calculation. The unchanged sample has INR 255 in items plus INR 40 shipping, totaling INR 295 through one retailer. Buying each item at its lowest listed price costs INR 225 in items plus INR 120 shipping, totaling INR 345.
+2. Change the first quantity from two to three. The old result is marked stale; recalculate to obtain INR 370. Remove and add a component, then reset the sample. Duplicate component selectors are disabled; increase quantity instead.
+3. Expand matching details. Exact model and required attributes matter: a DHT11 bare sensor is not the same requested product as a breakout module. A contradictory required specification cannot be approved away.
+4. Switch to **Live quote**, enter the private team token and **Check connection**. Start a fresh quote. This creates new collection work. Show the timer, progressive product results and any unresolved checks. If shipping tax is unknown, the combined amount is explicitly an estimate, with known item tax included.
+5. Open **Evidence**. Show the original retailer content, current SKU-specific API ordering rules, linked datasheet excerpt, collection time and saved TinyFish browser run ID. Resume a saved quote to demonstrate recovery, clearly identifying it as saved work.
 
-Direct-key Fetch works and originals are saved for Robu and Robocraze. A direct Agent research run reported a three-line ₹248 cart but no usable shipping/serviceability. A replacement Google key restored generation. Real Flash-Lite extraction recovered published Robu/Robocraze prices, but some extractions timed out and required fields remain unknown. Therefore the required complete live recommendation has not passed, and should not be claimed during judging.
+## What the latest real test demonstrates
 
-The strongest differentiator is an auditable complete basket calculation that rejects misleading product matches. More retailer logos, unsupported delivery promises or decorative AI badges do not strengthen that evidence.
+A fresh three-line collection matched all parts and established prices, item tax and order rules in 5.313 seconds. An exact guest-cart shipping estimate appeared at 7.464 seconds. These are measured live events, not a complete-quote pass. The estimator returned INR 49 shipping but did not disclose shipping tax or a final delivered total. Robu returned timeout errors. Terminal status was partial after 26.320 seconds.
 
-Before submission, gather one short user example from a team buying parts, verify the real basket manually, and record the successful live workflow. No user interviews, human verification, presentation or demo video are claimed in this repository.
+Do not describe INR 248 in items plus the INR 49 shipping estimate as a verified delivered recommendation. The app can display INR 297 as an items + shipping estimate, with shipping tax unconfirmed; the verified final total remains unknown. Further ten-second optimization is deferred for this local delivery.
 
-## Seven-second presentation constraint
+## Presenter preparation
 
-The mentor requires a complete fresh quote within seven seconds. The current version has not passed that requirement. A cached comparison, queue acknowledgement or partial price list cannot qualify. The fresh action shows elapsed time and a missed-deadline notice; do not hide that notice or present older captures as new collection. The separate saved-data view can explain the product, but does not satisfy this rule.
+- Keep the database, web server, worker and network running. Verify readiness immediately before presenting.
+- Keep the private team token available locally. Never show provider keys or `.env.local` on the projector.
+- Run one fresh collection before the demo to check provider availability; it consumes quota. Saved observations can explain recovery but are not a substitute for fresh timing.
+- If a retailer blocks collection, show the truthful partial state and the working sample calculation. Do not call this a successful complete live comparison.
+
+No public hosting, interviews, accuracy study, presentation deck or demo video is claimed. Those require separate work or evidence.

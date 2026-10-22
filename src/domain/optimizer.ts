@@ -30,16 +30,34 @@ export function priceLine(part: PartRequest, offer: Offer): LineCost | null {
     !offer.multiplePacks
   )
     return null;
-  const packs =
+  const minimum =
     Math.ceil(
       Math.max(Math.ceil(part.quantity / offer.unitsPerPack), offer.minPacks) /
         offer.multiplePacks,
     ) * offer.multiplePacks;
-  if (offer.availablePacks !== null && packs > offer.availablePacks)
+  if (offer.availablePacks !== null && minimum > offer.availablePacks)
     return null;
-  const tier = [...offer.priceBreaks]
-    .sort((a, b) => b.minPacks - a.minPacks)
-    .find((p) => packs >= p.minPacks);
+  // A higher published tier may cost less in total, even with surplus units.
+  // Between tier boundaries the total only increases, so no unit-by-unit search is needed.
+  const multiple = offer.multiplePacks;
+  const tiers = [...offer.priceBreaks].sort((a, b) => b.minPacks - a.minPacks);
+  const candidates = [
+    ...new Set([
+      minimum,
+      ...offer.priceBreaks.map(
+        (tier) =>
+          Math.ceil(Math.max(minimum, tier.minPacks) / multiple) * multiple,
+      ),
+    ]),
+  ].filter(
+    (packs) => offer.availablePacks === null || packs <= offer.availablePacks,
+  );
+  const totalAt = (packs: number) => {
+    const price = tiers.find((tier) => packs >= tier.minPacks);
+    return price ? packs * price.packPricePaise : Infinity;
+  };
+  const packs = candidates.sort((a, b) => totalAt(a) - totalAt(b) || a - b)[0];
+  const tier = tiers.find((p) => packs >= p.minPacks);
   if (!tier) return null;
   const itemsPaise = packs * tier.packPricePaise;
   const addedTaxPaise =
@@ -76,13 +94,23 @@ export function basketKey(
   pincode: string,
   lines: LineCost[],
 ): string {
-  return (
-    `${retailer}:${pincode}:` +
-    lines
-      .map((l) => `${l.offer.id}=${l.packs}`)
-      .sort()
-      .join("|")
-  );
+  return JSON.stringify([
+    "basket-v2",
+    retailer,
+    pincode,
+    [...lines]
+      .sort((a, b) => a.offer.id.localeCompare(b.offer.id))
+      .map((line) => ({
+        id: line.offer.id,
+        sku: line.offer.sku,
+        url: line.offer.url,
+        packs: line.packs,
+        unitsPerPack: line.offer.unitsPerPack,
+        itemsPaise: line.itemsPaise,
+        addedTaxPaise: line.addedTaxPaise,
+        payablePaise: line.payablePaise,
+      })),
+  ]);
 }
 function sumKnown(values: (number | null)[]): number | null {
   return values.some((v) => v === null)
@@ -168,24 +196,32 @@ export function buildPlans(
           addedTaxPaise: sumKnown(subset.map((l) => l.addedTaxPaise)),
           payableItemsPaise: sumKnown(subset.map((l) => l.payablePaise)),
         };
-        const observed = shipping.find(
-          (s) =>
-            s.basketKey === key &&
-            s.pincode === pincode &&
-            s.retailer === retailer &&
-            JSON.stringify(
-              [...s.items].sort((a, b) => a.offerId.localeCompare(b.offerId)),
-            ) ===
+        const observed = [...shipping]
+          .sort(
+            (a, b) =>
+              Number(b.status !== "unknown" || b.serviceable === false) -
+                Number(a.status !== "unknown" || a.serviceable === false) ||
+              Date.parse(b.observedAt) - Date.parse(a.observedAt) ||
+              Number(b.status === "verified") - Number(a.status === "verified"),
+          )
+          .find(
+            (s) =>
+              s.basketKey === key &&
+              s.pincode === pincode &&
+              s.retailer === retailer &&
               JSON.stringify(
-                subset
-                  .map((l) => ({
-                    offerId: l.offer.id,
-                    sku: l.offer.sku,
-                    packs: l.packs,
-                  }))
-                  .sort((a, b) => a.offerId.localeCompare(b.offerId)),
-              ),
-        );
+                [...s.items].sort((a, b) => a.offerId.localeCompare(b.offerId)),
+              ) ===
+                JSON.stringify(
+                  subset
+                    .map((l) => ({
+                      offerId: l.offer.id,
+                      sku: l.offer.sku,
+                      packs: l.packs,
+                    }))
+                    .sort((a, b) => a.offerId.localeCompare(b.offerId)),
+                ),
+          );
         const ship =
           observed ??
           ruleShipping(

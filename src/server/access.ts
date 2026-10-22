@@ -24,7 +24,7 @@ export function authorize(request: Request): string {
       "Enter your team access token to use live quotes.",
     );
   const origin = request.headers.get("origin");
-  if (!allowedOrigin(origin, request.url))
+  if (!allowedOrigin(origin, request.url, request.headers.get("host")))
     throw new AccessError(403, "Request origin not permitted.");
   return hash(expected).toString("hex");
 }
@@ -60,7 +60,7 @@ export function apiError(error: unknown): Response {
     return Response.json(
       {
         error:
-          "Check the pincode, quantities and required attributes. Choose three different catalogue components.",
+          "Check the pincode, quantities and required attributes. Choose at least one component and use each catalogue entry once.",
       },
       { status: 400 },
     );

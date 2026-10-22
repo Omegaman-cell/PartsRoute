@@ -39,7 +39,7 @@ export function matchOffer(part: PartRequest, offer: Offer): Offer {
   if (offer.orderingConflict) {
     match = "insufficient_information";
     reasons.push(
-      "Published and browser-observed ordering constraints conflict.",
+      "Published ordering or commercial details conflict across sources.",
     );
   } else if (conflict) match = "rejected";
   else if (missing || offer.model === null) match = "insufficient_information";
