@@ -45,7 +45,7 @@ The launcher starts the configured database, migrates it, builds production asse
 
 1. Start with **Sample calculation**. Explain that the prices are synthetic. Recalculate the default INR 295 example; changing the first quantity from two to three gives INR 370. Pincode changes in this mode do not fetch real shipping.
 2. Switch to **Live quote**, enter the generated `APP_ACCESS_TOKEN` and choose **Check connection**. Confirm both database and worker are ready.
-3. Collect fresh offers. Show progressive prices, exact product matching, and the timer. The hosted provider calls need internet access and available provider credits even though the app runs locally.
+3. Search a component such as ESP32 or Arduino Uno. Choose a real retailer listing and variant, then add it. Repeat for more components; live mode has no three-line limit. Quantities default to retailer packs; choose physical units only when the published pack size is known. Collect fresh offers. Show progressive prices, exact product matching, and the timer. The hosted provider calls need internet access and available provider credits even though the app runs locally.
 4. Show the **items + shipping estimate** and its tax qualification. Do not describe it as a verified final delivered total when shipping tax is unknown. Retailer blocking/timeouts are shown explicitly.
 5. Open **Evidence** to show actual source records, datasheet facts, shipping checks and saved run IDs. Resume/retry a saved quote if needed and identify it as saved work.
 

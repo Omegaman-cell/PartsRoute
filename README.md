@@ -8,7 +8,7 @@ Compare a small electronics bill of materials across Robu and Robocraze. The cal
 
 ## Current local version
 
-The application has a Next.js frontend and API, a PostgreSQL job queue, and a separate Node worker. The supported catalogue contains HC-SR04 sensors, DHT11 breakout modules and 400-point breadboards. Use one to three distinct components and change their quantities; arbitrary product discovery and BOM import are outside this version.
+The application has a Next.js frontend and API, a PostgreSQL job queue, and a separate Node worker. Live mode searches actual Robocraze and Robu listings by component name, part number or specification. Select a product and variant, add more components, edit quantities and remove rows. There is no three-component limit. The three original products remain only as sample fixtures and optional starter rows. BOM file import is not implemented.
 
 The sample is fully functional and explicitly synthetic. Live collection works with privately configured providers. On 22 October 2026, a new live three-line quote displayed complete product coverage in **5.313 seconds** and a matched-cart shipping estimate in **7.464 seconds**. It did **not** produce a verified delivered total within ten seconds. Robu timed out and Robocraze's estimator did not disclose shipping tax. The ten-second goal is now an optimization target rather than a release blocker. See [measured performance](docs/PERFORMANCE.md).
 
@@ -75,6 +75,6 @@ Use the [demo walkthrough](docs/DEMO-GUIDE.md). Demonstrate the sample arithmeti
 
 Cloud deployment is deferred in favor of recording the complete local app. The [hosting notes](docs/HOSTING.md) retain the full-stack deployment plan for later. No reduced-functionality Sites version was published.
 
-**Live limitations:** complete shipping-tax evidence and reliable collection from both retailers remain dependent on retailer access. A full fresh verified quote under ten seconds has not been achieved; that optimization is deferred for this local delivery. Paid hosting, arbitrary search, interviews and a demo video are not claimed.
+**Live limitations:** complete shipping-tax evidence and reliable collection from both retailers remain dependent on retailer access. A full fresh verified quote under ten seconds has not been achieved; that optimization is deferred for this local delivery. Paid hosting, interviews and a demo video are not claimed. Search currently supports the two integrated retailers; it does not claim to search every retailer.
 
 Built by **Team REsynced**, NSUT, for Kritical Hacks. Original repository: [PartsRoute](https://github.com/Daksh909-design/PartsRoute---Every-Part-One-Complete-Cost.).

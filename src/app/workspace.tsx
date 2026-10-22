@@ -19,6 +19,8 @@ import EvidenceView, { type EvidenceData } from "./evidence-view";
 import { Icon } from "./ui-icons";
 import { demoQuote } from "../domain/demo";
 import { liveRequest, type CollectionClock } from "../domain/live-request";
+import ComponentSearch from "./component-search";
+import type { SearchProduct } from "../domain/search";
 
 type Job = {
   id: string;
@@ -85,6 +87,9 @@ export default function Workspace() {
   const generation = useRef(0);
   const pollingStarted = useRef(0);
   const requestId = useRef<string | null>(null);
+  const liveDraft = useRef<{ parts: PartRequest[]; pincode: string } | null>(
+    null,
+  );
   useEffect(() => {
     if (liveAvailable) {
       const reference =
@@ -155,19 +160,71 @@ export default function Workspace() {
     ]);
     requestId.current = null;
   }
+  function addSearchProduct(product: SearchProduct, variantId?: number) {
+    const variant = product.variants.find((item) => item.id === variantId);
+    setParts((current) => {
+      const existing = current.find((part) =>
+        part.sources?.some(
+          (source) =>
+            source.retailer === product.retailer &&
+            source.url === product.url &&
+            source.variantId === variantId,
+        ),
+      );
+      if (existing)
+        return current.map((part) =>
+          part.id === existing.id
+            ? { ...part, quantity: Math.min(100, part.quantity + 1) }
+            : part,
+        );
+      return [
+        ...current,
+        {
+          id: crypto.randomUUID(),
+          catalogueId: `search:${product.id}:${variantId ?? "product"}`,
+          name: `${product.title}${variant && variant.title !== "Default Title" ? ` — ${variant.title}` : ""}`.slice(
+            0,
+            240,
+          ),
+          model: "",
+          quantity: 1,
+          quantityUnit: "packs",
+          sources: [
+            {
+              retailer: product.retailer,
+              url: product.url,
+              ...(variantId ? { variantId } : {}),
+            },
+          ],
+          requiredSpecs: [],
+          equivalentAcceptable: false,
+          confirmedOfferIds: [],
+        },
+      ];
+    });
+    requestId.current = null;
+  }
   function switchMode(next: "demo" | "live") {
     if (next === mode) return;
     cancelPolling();
     setMode(next);
-    const sample = QuoteInput.safeParse({
-      parts,
-      pincode,
-      mode: "demo",
-      refresh: false,
-    });
-    setResult(
-      next === "demo" && sample.success ? demoQuote(sample.data) : null,
-    );
+    if (next === "demo") {
+      liveDraft.current = { parts: structuredClone(parts), pincode };
+      setParts(structuredClone(sampleParts));
+      setPincode("560001");
+      setResult(
+        demoQuote({
+          parts: structuredClone(sampleParts),
+          pincode: "560001",
+          mode: "demo",
+          refresh: false,
+        }),
+      );
+    } else {
+      setParts(liveDraft.current?.parts ?? []);
+      setPincode(liveDraft.current?.pincode ?? pincode);
+      setResult(null);
+    }
     setJob(null);
     setEvidence(null);
     setError("");
@@ -551,10 +608,9 @@ export default function Workspace() {
                 {!liveAvailable ? (
                   <>
                     <p>
-                      This hosted demo runs the sample calculator. Live
-                      quotes need the server application, a database and a
-                      worker. TinyFish and AI provider keys belong on that
-                      server.
+                      This hosted demo runs the sample calculator. Live quotes
+                      need the server application, a database and a worker.
+                      TinyFish and AI provider keys belong on that server.
                     </p>
                     <a
                       className="setup-link"
@@ -665,7 +721,7 @@ export default function Workspace() {
                     onClick={reset}
                     disabled={busy}
                   >
-                    Reset sample
+                    {mode === "demo" ? "Reset sample" : "Load sample parts"}
                   </button>
                 </div>
                 <div className="bom-summary" aria-label="Parts list summary">
@@ -676,12 +732,32 @@ export default function Workspace() {
                     <strong>
                       {parts.reduce((sum, part) => sum + part.quantity, 0)}
                     </strong>{" "}
-                    units needed
+                    total requested
                   </span>
                   <span>
                     Deliver to <strong>{pincode || "—"}</strong>
                   </span>
                 </div>
+                {mode === "live" && liveAvailable && (
+                  <ComponentSearch
+                    token={token}
+                    disabled={busy || checking}
+                    add={addSearchProduct}
+                  />
+                )}
+                {mode === "demo" && (
+                  <p className="source-note">
+                    This sample contains three synthetic components. Choose{" "}
+                    <button
+                      className="text-button"
+                      type="button"
+                      onClick={() => switchMode("live")}
+                    >
+                      Live quote to search and add any component ↗
+                    </button>
+                    .
+                  </p>
+                )}
                 <form
                   onSubmit={(event) => {
                     event.preventDefault();
@@ -705,37 +781,57 @@ export default function Workspace() {
                           >
                             Component {index + 1}
                           </label>
-                          <select
-                            id={`component-${part.id}`}
-                            value={part.catalogueId}
-                            onChange={(event) => {
-                              const entry = catalogue.find(
-                                (item) => item.id === event.target.value,
-                              )!;
-                              patch(part.id, {
-                                catalogueId: entry.id,
-                                name: entry.name,
-                                model: entry.model,
-                                requiredSpecs: entry.specs.map((spec) => ({
-                                  ...spec,
-                                })),
-                              });
-                            }}
-                          >
-                            {catalogue.map((entry) => (
-                              <option
-                                key={entry.id}
-                                value={entry.id}
-                                disabled={parts.some(
-                                  (other) =>
-                                    other.id !== part.id &&
-                                    other.catalogueId === entry.id,
-                                )}
-                              >
-                                {entry.name}
-                              </option>
-                            ))}
-                          </select>
+                          {part.sources?.length ? (
+                            <div>
+                              <h3>{part.name}</h3>
+                              {part.sources.map((source) => (
+                                <a
+                                  key={source.url}
+                                  href={source.url}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                >
+                                  Selected retailer product ↗
+                                </a>
+                              ))}
+                              <p className="source-note">
+                                Exact listing selected. Additional
+                                specifications below must still be verified.
+                              </p>
+                            </div>
+                          ) : (
+                            <select
+                              id={`component-${part.id}`}
+                              value={part.catalogueId}
+                              onChange={(event) => {
+                                const entry = catalogue.find(
+                                  (item) => item.id === event.target.value,
+                                )!;
+                                patch(part.id, {
+                                  catalogueId: entry.id,
+                                  name: entry.name,
+                                  model: entry.model,
+                                  requiredSpecs: entry.specs.map((spec) => ({
+                                    ...spec,
+                                  })),
+                                });
+                              }}
+                            >
+                              {catalogue.map((entry) => (
+                                <option
+                                  key={entry.id}
+                                  value={entry.id}
+                                  disabled={parts.some(
+                                    (other) =>
+                                      other.id !== part.id &&
+                                      other.catalogueId === entry.id,
+                                  )}
+                                >
+                                  {entry.name}
+                                </option>
+                              ))}
+                            </select>
+                          )}
                           <div className="attribute-summary">
                             {part.requiredSpecs.map((spec, key) => (
                               <span key={key}>
@@ -743,7 +839,7 @@ export default function Workspace() {
                               </span>
                             ))}
                           </div>
-                          {parts.length > 1 && (
+                          {(mode === "live" || parts.length > 1) && (
                             <button
                               className="text-button"
                               type="button"
@@ -761,7 +857,10 @@ export default function Workspace() {
                             <summary>Edit matching requirements</summary>
                             <div className="attribute-fields">
                               <label htmlFor={`model-${part.id}`}>
-                                Exact model
+                                Exact model{" "}
+                                {part.sources?.length
+                                  ? "(optional; leave blank to use selected listing)"
+                                  : ""}
                                 <input
                                   id={`model-${part.id}`}
                                   value={part.model}
@@ -772,6 +871,28 @@ export default function Workspace() {
                                   }
                                 />
                               </label>
+                              {part.sources?.length ? (
+                                <label>
+                                  Quantity means
+                                  <select
+                                    value={part.quantityUnit ?? "units"}
+                                    onChange={(event) =>
+                                      patch(part.id, {
+                                        quantityUnit: event.target.value as
+                                          "units" | "packs",
+                                      })
+                                    }
+                                  >
+                                    <option value="packs">
+                                      Retailer packs, as listed
+                                    </option>
+                                    <option value="units">
+                                      Individual units (requires verified pack
+                                      contents)
+                                    </option>
+                                  </select>
+                                </label>
+                              ) : null}
                               {part.requiredSpecs.map((spec, specIndex) => (
                                 <div className="attribute-pair" key={specIndex}>
                                   <label>
@@ -874,6 +995,13 @@ export default function Workspace() {
                           </details>
                         </div>
                         <label className="quantity">
+                          {part.sources?.length ? (
+                            <small>
+                              {part.quantityUnit === "packs"
+                                ? "Packs"
+                                : "Units"}
+                            </small>
+                          ) : null}
                           <span className="sr-only">
                             Quantity for component {index + 1}
                           </span>
@@ -894,15 +1022,19 @@ export default function Workspace() {
                         </label>
                       </article>
                     ))}
-                    {parts.length < catalogue.length && (
-                      <button
-                        className="secondary"
-                        type="button"
-                        onClick={addPart}
-                      >
-                        Add component
-                      </button>
-                    )}
+                    {mode === "demo" &&
+                      catalogue.some(
+                        (entry) =>
+                          !parts.some((part) => part.catalogueId === entry.id),
+                      ) && (
+                        <button
+                          className="secondary"
+                          type="button"
+                          onClick={addPart}
+                        >
+                          Add component
+                        </button>
+                      )}
                     <div className="delivery-row">
                       <label htmlFor="pincode">
                         Delivery pincode
@@ -928,7 +1060,10 @@ export default function Workspace() {
                     <button
                       className="primary"
                       type="submit"
-                      disabled={mode === "live" && (!liveAvailable || !token)}
+                      disabled={
+                        mode === "live" &&
+                        (!liveAvailable || !token || !parts.length)
+                      }
                     >
                       {busy
                         ? "Checking options…"
@@ -1073,7 +1208,7 @@ export default function Workspace() {
                           ? job?.status === "failed"
                             ? "Review the error above. Any pages already collected remain saved with this quote; open Evidence to inspect them before retrying."
                             : "The main button collects current retailer data. Saved observations are available separately and are never counted as a fresh quote."
-                          : "Calculate this three-part prototype to compare complete baskets, including shipping once per retailer."}
+                          : "Search real retailer products and add them to your parts list to compare basket costs."}
                       </p>
                       <div className="empty-breakdown">
                         <div>

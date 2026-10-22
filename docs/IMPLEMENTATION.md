@@ -7,7 +7,7 @@ Local work starts from `96bd214`. Hosting stays local; paid hosting is not autho
 - [x] Worker ownership is fenced by owner, attempt and unexpired lease; stale writes are rejected and local requests receive cancellation.
 - [x] Provider waits use the shared deadline/cancellation signal. Remote Agent work may outlive a local request and retains a recoverable ID.
 - [x] Published price tiers and quantity/stock bounds are considered without defaulting absent ordering rules.
-- [x] Catalogue limits and the UI agree on one to three distinct supported components.
+- [x] Live search accepts arbitrary component listings from the integrated retailers, with no three-line limit; sample fixtures remain clearly labeled.
 - [x] PostgreSQL, web and worker start with the documented local launcher.
 - [x] Unit, real PostgreSQL, HTTP, type and production/static build checks have passed locally.
 - [x] CI workflow is included; local checks below are independent of any GitHub workflow result.

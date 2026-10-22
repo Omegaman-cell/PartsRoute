@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { catalogue, retailers } from "../domain/catalogue";
+import { sourceFor, retailers } from "../domain/catalogue";
 import {
   Offer,
   QuoteInput,
@@ -289,10 +289,17 @@ export async function processQuote(
 ): Promise<QuoteResult> {
   // Leave response/persistence headroom around the bounded collection window.
   // Expiry yields a truthful partial result, never a verified substitute.
-  const deadline = Date.now() + collectionWindowMs();
+  const parsedInput = QuoteInput.parse(rawInput);
+  const deadline =
+    Date.now() +
+    Math.min(
+      300000,
+      collectionWindowMs() *
+        Math.max(1, Math.ceil(parsedInput.parts.length / 8)),
+    );
   const collector =
     tiny ?? new TinyFishClient(undefined, undefined, deadline, lease?.signal);
-  const input = QuoteInput.parse(rawInput),
+  const input = parsedInput,
     offers: Offer[] = [],
     rules: ShippingRule[] = [],
     shipping: ShippingObservation[] = [],
@@ -305,49 +312,59 @@ export async function processQuote(
   const products = new Map<string, StoreProduct>();
   const orderSources = new Map<string, Evidence>();
   const productRequests = new Map(
-    input.parts.map((part) => {
-      const entry = catalogue.find((c) => c.id === part.catalogueId)!;
-      const id = `robocraze:${entry.id}`;
-      return [
-        id,
-        storefront
-          ? storefront
-              .product(entry.urls.robocraze)
-              .then(async (product) => {
-                const o = await saveObservation(
-                  jobId,
-                  supplementalKey(`storefront:${entry.id}`, product),
-                  "robocraze",
-                  `${entry.urls.robocraze}.js`,
-                  "storefront-api",
-                  product,
-                  null,
-                  lease,
-                );
-                products.set(id, product);
-                orderSources.set(id, evidence(o, JSON.stringify(product)));
-                return product;
-              })
-              .catch((error) => {
-                if (error instanceof LeaseLost) throw error;
-                lease?.signal.throwIfAborted();
-                errors.push(
-                  `Robocraze: published ordering rules unavailable. ${message(error)}`,
-                );
-                return null;
-              })
-          : Promise.resolve(null),
-      ];
-    }),
+    input.parts
+      .filter((part) => sourceFor(part, "robocraze"))
+      .map((part) => {
+        const entry = {
+          id: part.catalogueId,
+          urls: { robocraze: sourceFor(part, "robocraze")!.url },
+        };
+        const id = `robocraze:${entry.id}`;
+        return [
+          id,
+          storefront
+            ? storefront
+                .product(entry.urls.robocraze)
+                .then(async (product) => {
+                  const o = await saveObservation(
+                    jobId,
+                    supplementalKey(`storefront:${entry.id}`, product),
+                    "robocraze",
+                    `${entry.urls.robocraze}.js`,
+                    "storefront-api",
+                    product,
+                    null,
+                    lease,
+                  );
+                  products.set(id, product);
+                  orderSources.set(id, evidence(o, JSON.stringify(product)));
+                  return product;
+                })
+                .catch((error) => {
+                  if (error instanceof LeaseLost) throw error;
+                  lease?.signal.throwIfAborted();
+                  errors.push(
+                    `Robocraze: published ordering rules unavailable. ${message(error)}`,
+                  );
+                  return null;
+                })
+            : Promise.resolve(null),
+        ];
+      }),
   );
   const datasheetRequests = new Map(
     input.parts
       .filter(
         (part) =>
-          part.requiredSpecs.some((spec) => spec.key === "pins") && !tiny,
+          part.requiredSpecs.some((spec) => spec.key === "pins") &&
+          !tiny &&
+          Boolean(sourceFor(part, "robocraze")),
       )
       .map((part) => {
-        const entry = catalogue.find((c) => c.id === part.catalogueId)!;
+        const entry = {
+          id: part.catalogueId,
+          urls: { robocraze: sourceFor(part, "robocraze")!.url },
+        };
         const id = `robocraze:${entry.id}`;
         return [
           id,
@@ -399,8 +416,33 @@ export async function processQuote(
   const addStorefrontOrders = async (offer: Offer): Promise<Offer> => {
     const product = await productRequests.get(offer.id);
     const source = orderSources.get(offer.id);
+    const requested = input.parts.find((part) => part.id === offer.partId);
+    const variantId =
+      requested && sourceFor(requested, offer.retailer)?.variantId;
+    const variant = product?.variants.find((item) => item.id === variantId);
+    // A selected variant has its own published SKU/price. The product page's
+    // lowest variant price must not replace it or create a false conflict.
+    const selected =
+      requested?.sources?.length && variant && source && product
+        ? {
+            ...offer,
+            variantId: variant.id,
+            title: product.title,
+            sku: variant.sku,
+            priceBreaks: [{ minPacks: 1, packPricePaise: variant.price }],
+            stock: variant.available
+              ? ("in_stock" as const)
+              : ("out_of_stock" as const),
+            unitsPerPack: offer.sku === variant.sku ? offer.unitsPerPack : null,
+            evidence: [...offer.evidence, source],
+          }
+        : variantId
+          ? { ...offer, variantId }
+          : offer;
     const ordered =
-      product && source ? storefrontOrders(offer, product, source) : offer;
+      product && source
+        ? storefrontOrders(selected, product, source)
+        : selected;
     const datasheet = await datasheetRequests.get(offer.id);
     return datasheet
       ? {
@@ -522,341 +564,381 @@ export async function processQuote(
   // One Fetch batch per retailer; per-URL failures remain distinct. At most two
   // batches run at once. Cached pages and saved runs are reused on resumption.
   await Promise.all(
-    (["robu", "robocraze"] as const).map(async (retailer) => {
-      let batch: Promise<FetchResponse> | undefined;
-      const fetchBatch = () =>
-        (batch ??= (async () => {
-          const urls = [
-            ...input.parts.map(
-              (part) =>
-                catalogue.find((c) => c.id === part.catalogueId)!.urls[
-                  retailer
-                ],
-            ),
-            retailers[retailer].policyUrl,
-          ];
-          const startedAt = new Date().toISOString();
-          const started = performance.now();
-          let original: FetchResponse;
-          try {
-            original = await collector.fetchPages(
-              urls,
-              retailer,
-              input.refresh,
-            );
-          } catch (error) {
+    (["robu", "robocraze"] as const)
+      .filter((retailer) =>
+        input.parts.some((part) => sourceFor(part, retailer)),
+      )
+      .map(async (retailer) => {
+        let batch: Promise<FetchResponse> | undefined;
+        const fetchBatch = () =>
+          (batch ??= (async () => {
+            const urls = [
+              ...new Set([
+                ...input.parts.flatMap((part) => {
+                  const source = sourceFor(part, retailer);
+                  return source ? [source.url] : [];
+                }),
+                retailers[retailer].policyUrl,
+              ]),
+            ];
+            const startedAt = new Date().toISOString();
+            const started = performance.now();
+            let original: FetchResponse;
+            try {
+              original = { results: [], errors: [] };
+              for (let offset = 0; offset < urls.length; offset += 10) {
+                const chunk = urls.slice(offset, offset + 10);
+                const returned = await collector.fetchPages(
+                  chunk,
+                  retailer,
+                  input.refresh,
+                );
+                // Save each completed batch immediately so interruption retains it.
+                await Promise.all(
+                  chunk.map((url) =>
+                    saveObservation(
+                      jobId,
+                      `fetch:${url}`,
+                      retailer,
+                      url,
+                      "tinyfish-fetch",
+                      returned,
+                      null,
+                      lease,
+                    ),
+                  ),
+                );
+                original.results.push(...returned.results);
+                original.errors.push(...returned.errors);
+              }
+            } catch (error) {
+              await usage(jobId, {
+                provider: "tinyfish-fetch",
+                model: "fetch",
+                requestId: null,
+                inputTokens: null,
+                outputTokens: null,
+                raw: {
+                  state: "failed",
+                  startedAt,
+                  latencyMs: Math.round(performance.now() - started),
+                  urls,
+                  refresh: input.refresh,
+                  usage: null,
+                },
+              });
+              throw error;
+            }
             await usage(jobId, {
               provider: "tinyfish-fetch",
               model: "fetch",
-              requestId: null,
+              requestId:
+                typeof original.request_id === "string"
+                  ? original.request_id
+                  : null,
               inputTokens: null,
               outputTokens: null,
               raw: {
-                state: "failed",
+                state: "responded",
                 startedAt,
                 latencyMs: Math.round(performance.now() - started),
-                urls,
                 refresh: input.refresh,
-                usage: null,
+                urls,
+                usage: original.usage ?? null,
+                errors: original.errors,
               },
             });
-            throw error;
-          }
-          await usage(jobId, {
-            provider: "tinyfish-fetch",
-            model: "fetch",
-            requestId:
-              typeof original.request_id === "string"
-                ? original.request_id
-                : null,
-            inputTokens: null,
-            outputTokens: null,
-            raw: {
-              state: "responded",
-              startedAt,
-              latencyMs: Math.round(performance.now() - started),
-              refresh: input.refresh,
-              urls,
-              usage: original.usage ?? null,
-              errors: original.errors,
-            },
-          });
-          // Persist the whole returned batch before extraction. Otherwise later
-          // pages appear to have been retrieved minutes after the HTTP response,
-          // and a model failure can leave already-fetched pages unsaved.
-          await Promise.all(
-            urls.map((url) =>
-              saveObservation(
-                jobId,
-                `fetch:${url}`,
-                retailer,
-                url,
-                "tinyfish-fetch",
-                original,
-                null,
-                lease,
+            // Persist the whole returned batch before extraction. Otherwise later
+            // pages appear to have been retrieved minutes after the HTTP response,
+            // and a model failure can leave already-fetched pages unsaved.
+            await Promise.all(
+              urls.map((url) =>
+                saveObservation(
+                  jobId,
+                  `fetch:${url}`,
+                  retailer,
+                  url,
+                  "tinyfish-fetch",
+                  original,
+                  null,
+                  lease,
+                ),
               ),
-            ),
-          );
-          return original;
-        })());
-      const collectProducts = async () => {
-        await Promise.all(
-          input.parts.map(async (part) => {
-            if (accessFailure) return;
-            const entry = catalogue.find((c) => c.id === part.catalogueId)!;
-            try {
-              const o = await pageObservation(
-                jobId,
-                retailer,
-                entry.urls[retailer],
-                input.refresh,
-                collector,
-                fetchBatch,
-                lease,
-              );
-              if (
-                o.normalized &&
-                o.normalization_version === NORMALIZATION_VERSION &&
-                Offer.parse(o.normalized).extractionMethod !== "retailer-parser"
-              ) {
-                offers.push(matchOffer(part, Offer.parse(o.normalized)));
-                return;
-              }
-              const response = FetchResponse.parse(o.original);
-              if (response.errors.some((e) => e.url === entry.urls[retailer]))
-                errors.push(
-                  ...response.errors
-                    .filter((e) => e.url === entry.urls[retailer])
-                    .map(
-                      (e) =>
-                        `${retailers[retailer].name}: ${part.name} could not be retrieved (${String(e.error).slice(0, 160)}).`,
-                    ),
-                );
-              const page = response.results.find(
-                (p) => p.url === entry.urls[retailer],
-              );
-              if (!page || page.text.length < 500) {
-                if (!response.errors.length)
-                  errors.push(
-                    `${retailers[retailer].name}: ${part.name} returned incomplete page content.`,
+            );
+            return original;
+          })());
+        const collectProducts = async () => {
+          await Promise.all(
+            input.parts
+              .filter((part) => sourceFor(part, retailer))
+              .map(async (part) => {
+                if (accessFailure) return;
+                const source = sourceFor(part, retailer)!;
+                const entry = {
+                  id: part.catalogueId,
+                  urls: { [retailer]: source.url },
+                };
+                try {
+                  const o = await pageObservation(
+                    jobId,
+                    retailer,
+                    entry.urls[retailer],
+                    input.refresh,
+                    collector,
+                    fetchBatch,
+                    lease,
                   );
-                return;
-              }
-              const preliminary = retailerProduct(page.text, retailer);
-              let sourceComplete = false;
-              if (preliminary) {
-                const offer = matchOffer(
-                  part,
-                  await addStorefrontOrders({
-                    ...groundedOffer(
-                      preliminary,
-                      page.text,
-                      { ...evidence(o), sourceUrl: page.final_url },
-                      retailer,
-                      part.id,
-                      `${retailer}:${entry.id}`,
+                  if (
+                    o.normalized &&
+                    o.normalization_version === NORMALIZATION_VERSION &&
+                    Offer.parse(o.normalized).extractionMethod !==
+                      "retailer-parser"
+                  ) {
+                    offers.push(matchOffer(part, Offer.parse(o.normalized)));
+                    return;
+                  }
+                  const response = FetchResponse.parse(o.original);
+                  if (
+                    response.errors.some((e) => e.url === entry.urls[retailer])
+                  )
+                    errors.push(
+                      ...response.errors
+                        .filter((e) => e.url === entry.urls[retailer])
+                        .map(
+                          (e) =>
+                            `${retailers[retailer].name}: ${part.name} could not be retrieved (${String(e.error).slice(0, 160)}).`,
+                        ),
+                    );
+                  const page = response.results.find(
+                    (p) => p.url === entry.urls[retailer],
+                  );
+                  if (!page || page.text.length < 500) {
+                    if (!response.errors.length)
+                      errors.push(
+                        `${retailers[retailer].name}: ${part.name} returned incomplete page content.`,
+                      );
+                    return;
+                  }
+                  const preliminary = retailerProduct(
+                    page.text,
+                    retailer,
+                    Boolean(part.sources?.length),
+                  );
+                  let sourceComplete = false;
+                  if (preliminary) {
+                    const offer = matchOffer(
+                      part,
+                      await addStorefrontOrders({
+                        ...groundedOffer(
+                          preliminary,
+                          page.text,
+                          { ...evidence(o), sourceUrl: page.final_url },
+                          retailer,
+                          part.id,
+                          `${retailer}:${entry.id}`,
+                        ),
+                        extractionMethod: "retailer-parser",
+                      }),
+                    );
+                    const index = offers.findIndex(
+                      (current) => current.id === offer.id,
+                    );
+                    if (index < 0) offers.push(offer);
+                    else offers[index] = offer;
+                    const priced = priceLine(part, offer);
+                    sourceComplete =
+                      priced !== null && priced.payablePaise !== null;
+                    await normalizeObservation(o.id, offer, lease);
+                    await saveResult(
+                      jobId,
+                      finish(input, offers, rules, shipping, errors),
+                      lease,
+                    );
+                  }
+                  if (sourceComplete && !hasPublishedQuantityPricing(page.text))
+                    return;
+                  const ex =
+                    preliminary && ai.productDetails
+                      ? withProductDetails(
+                          preliminary,
+                          await ai.productDetails(
+                            page.text,
+                            page.final_url,
+                            part.model,
+                            part.requiredSpecs.map((spec) => spec.key),
+                          ),
+                        )
+                      : await ai.product(page.text, page.final_url, part.model);
+                  const offer = matchOffer(
+                    part,
+                    await addStorefrontOrders(
+                      groundedOffer(
+                        ex,
+                        page.text,
+                        { ...evidence(o), sourceUrl: page.final_url },
+                        retailer,
+                        part.id,
+                        `${retailer}:${entry.id}`,
+                      ),
                     ),
-                    extractionMethod: "retailer-parser",
+                  );
+                  if (
+                    !offer.unitsPerPack ||
+                    !offer.minPacks ||
+                    !offer.multiplePacks ||
+                    !offer.priceBreaks.length
+                  )
+                    offer.reasons.push(orderingUnknown);
+                  offer.extractionMethod = "ai";
+                  await normalizeObservation(o.id, offer, lease);
+                  const index = offers.findIndex(
+                    (current) => current.id === offer.id,
+                  );
+                  if (index < 0) offers.push(offer);
+                  else offers[index] = offer;
+                  await saveResult(
+                    jobId,
+                    finish(input, offers, rules, shipping, errors),
+                    lease,
+                  );
+                } catch (error) {
+                  if (error instanceof LeaseLost) throw error;
+                  lease?.signal.throwIfAborted();
+                  if (error instanceof ProviderAccessError) {
+                    accessFailure = error;
+                    return;
+                  }
+                  errors.push(
+                    `${retailers[retailer].name}: ${part.name} ${offers.some((offer) => offer.id === `${retailer}:${entry.id}`) ? "AI details unverified; published listing facts retained." : "unavailable."} ${message(error)}`,
+                  );
+                }
+              }),
+          );
+          if (retailer === "robocraze" && storefront) {
+            const candidate = verificationCandidates(
+              input,
+              offers.filter((offer) => offer.retailer === retailer),
+              rules,
+            )[0]?.baskets[0];
+            if (candidate && Date.now() < deadline) {
+              try {
+                const inspected = await storefront.shipping(
+                  candidate,
+                  input.pincode,
+                  products,
+                );
+                const o = await saveObservation(
+                  jobId,
+                  supplementalKey("storefront-basket", {
+                    basketKey: candidate.key,
+                    inspected,
                   }),
+                  retailer,
+                  retailers[retailer].cartUrl,
+                  "storefront-api",
+                  inspected,
+                  null,
+                  lease,
                 );
-                const index = offers.findIndex(
-                  (current) => current.id === offer.id,
+                const observed = storefrontShipping(
+                  candidate,
+                  inspected,
+                  evidence(o, JSON.stringify(inspected)),
                 );
-                if (index < 0) offers.push(offer);
-                else offers[index] = offer;
-                const priced = priceLine(part, offer);
-                sourceComplete =
-                  priced !== null && priced.payablePaise !== null;
-                await normalizeObservation(o.id, offer, lease);
+                shipping.push(observed);
+                await normalizeObservation(o.id, observed, lease);
                 await saveResult(
                   jobId,
                   finish(input, offers, rules, shipping, errors),
                   lease,
                 );
+              } catch (error) {
+                if (error instanceof LeaseLost) throw error;
+                lease?.signal.throwIfAborted();
+                errors.push(
+                  `Robocraze: storefront shipping estimate unavailable. ${message(error)}`,
+                );
               }
-              if (sourceComplete && !hasPublishedQuantityPricing(page.text))
-                return;
-              const ex =
-                preliminary && ai.productDetails
-                  ? withProductDetails(
-                      preliminary,
-                      await ai.productDetails(
-                        page.text,
-                        page.final_url,
-                        part.model,
-                        part.requiredSpecs.map((spec) => spec.key),
-                      ),
-                    )
-                  : await ai.product(page.text, page.final_url, part.model);
-              const offer = matchOffer(
-                part,
-                await addStorefrontOrders(
-                  groundedOffer(
-                    ex,
-                    page.text,
-                    { ...evidence(o), sourceUrl: page.final_url },
-                    retailer,
-                    part.id,
-                    `${retailer}:${entry.id}`,
-                  ),
-                ),
-              );
-              if (
-                !offer.unitsPerPack ||
-                !offer.minPacks ||
-                !offer.multiplePacks ||
-                !offer.priceBreaks.length
-              )
-                offer.reasons.push(orderingUnknown);
-              offer.extractionMethod = "ai";
-              await normalizeObservation(o.id, offer, lease);
-              const index = offers.findIndex(
-                (current) => current.id === offer.id,
-              );
-              if (index < 0) offers.push(offer);
-              else offers[index] = offer;
-              await saveResult(
-                jobId,
-                finish(input, offers, rules, shipping, errors),
-                lease,
-              );
-            } catch (error) {
-              if (error instanceof LeaseLost) throw error;
-              lease?.signal.throwIfAborted();
-              if (error instanceof ProviderAccessError) {
-                accessFailure = error;
-                return;
-              }
-              errors.push(
-                `${retailers[retailer].name}: ${part.name} ${offers.some((offer) => offer.id === `${retailer}:${entry.id}`) ? "AI details unverified; published listing facts retained." : "unavailable."} ${message(error)}`,
-              );
             }
-          }),
-        );
-        if (retailer === "robocraze" && storefront) {
+          }
+          // A complete retailer basket can be checked while another retailer is
+          // still collecting. The shared budget and seen keys prevent duplicates.
           const candidate = verificationCandidates(
             input,
             offers.filter((offer) => offer.retailer === retailer),
             rules,
           )[0]?.baskets[0];
-          if (candidate && Date.now() < deadline) {
-            try {
-              const inspected = await storefront.shipping(
-                candidate,
-                input.pincode,
-                products,
-              );
-              const o = await saveObservation(
-                jobId,
-                supplementalKey("storefront-basket", {
-                  basketKey: candidate.key,
-                  inspected,
-                }),
-                retailer,
-                retailers[retailer].cartUrl,
-                "storefront-api",
-                inspected,
-                null,
-                lease,
-              );
-              const observed = storefrontShipping(
-                candidate,
-                inspected,
-                evidence(o, JSON.stringify(inspected)),
-              );
-              shipping.push(observed);
-              await normalizeObservation(o.id, observed, lease);
-              await saveResult(
-                jobId,
-                finish(input, offers, rules, shipping, errors),
-                lease,
-              );
-            } catch (error) {
-              if (error instanceof LeaseLost) throw error;
-              lease?.signal.throwIfAborted();
-              errors.push(
-                `Robocraze: storefront shipping estimate unavailable. ${message(error)}`,
-              );
+          if (candidate) await checkBasket(candidate);
+        };
+        const collectPolicy = async () => {
+          if (accessFailure) return;
+          try {
+            const o = await pageObservation(
+              jobId,
+              retailer,
+              retailers[retailer].policyUrl,
+              input.refresh,
+              collector,
+              fetchBatch,
+              lease,
+            );
+            if (
+              o.normalized &&
+              o.normalization_version === NORMALIZATION_VERSION
+            ) {
+              rules.push(o.normalized as ShippingRule);
+              return;
             }
-          }
-        }
-        // A complete retailer basket can be checked while another retailer is
-        // still collecting. The shared budget and seen keys prevent duplicates.
-        const candidate = verificationCandidates(
-          input,
-          offers.filter((offer) => offer.retailer === retailer),
-          rules,
-        )[0]?.baskets[0];
-        if (candidate) await checkBasket(candidate);
-      };
-      const collectPolicy = async () => {
-        if (accessFailure) return;
-        try {
-          const o = await pageObservation(
-            jobId,
-            retailer,
-            retailers[retailer].policyUrl,
-            input.refresh,
-            collector,
-            fetchBatch,
-            lease,
-          );
-          if (
-            o.normalized &&
-            o.normalization_version === NORMALIZATION_VERSION
-          ) {
-            rules.push(o.normalized as ShippingRule);
-            return;
-          }
-          const response = FetchResponse.parse(o.original),
-            page = response.results.find(
-              (p) => p.url === retailers[retailer].policyUrl,
+            const response = FetchResponse.parse(o.original),
+              page = response.results.find(
+                (p) => p.url === retailers[retailer].policyUrl,
+              );
+            if (
+              !page ||
+              response.errors.some(
+                (e) => e.url === retailers[retailer].policyUrl,
+              )
+            )
+              throw new Error("Shipping policy could not be retrieved");
+            if (page.text.includes("Shipping Policy Page Content"))
+              throw new Error(
+                "Retailer returned a placeholder rather than an applicable shipping policy.",
+              );
+            // Policy text is useful evidence, but a national banner cannot prove
+            // destination applicability or a final shipping charge. Keep it out
+            // of the model critical path; only exact-cart observations qualify.
+            const rule: ShippingRule = {
+              retailer,
+              basis: "unknown",
+              thresholdPaise: null,
+              comparison: "gte",
+              belowChargePaise: null,
+              aboveChargePaise: null,
+              taxStatus: "unknown",
+              taxRateBps: null,
+              applicable: false,
+              conditions:
+                "Retailer policy captured. Exact destination and cart shipping still require verification.",
+              evidence: [evidence(o, page.text.slice(0, 3000))],
+            };
+            await normalizeObservation(o.id, rule, lease);
+            rules.push(rule);
+          } catch (error) {
+            if (error instanceof LeaseLost) throw error;
+            lease?.signal.throwIfAborted();
+            if (error instanceof ProviderAccessError) {
+              accessFailure = error;
+              return;
+            }
+            errors.push(
+              `${retailers[retailer].name}: shipping policy unavailable. ${message(error)}`,
             );
-          if (
-            !page ||
-            response.errors.some((e) => e.url === retailers[retailer].policyUrl)
-          )
-            throw new Error("Shipping policy could not be retrieved");
-          if (page.text.includes("Shipping Policy Page Content"))
-            throw new Error(
-              "Retailer returned a placeholder rather than an applicable shipping policy.",
-            );
-          // Policy text is useful evidence, but a national banner cannot prove
-          // destination applicability or a final shipping charge. Keep it out
-          // of the model critical path; only exact-cart observations qualify.
-          const rule: ShippingRule = {
-            retailer,
-            basis: "unknown",
-            thresholdPaise: null,
-            comparison: "gte",
-            belowChargePaise: null,
-            aboveChargePaise: null,
-            taxStatus: "unknown",
-            taxRateBps: null,
-            applicable: false,
-            conditions:
-              "Retailer policy captured. Exact destination and cart shipping still require verification.",
-            evidence: [evidence(o, page.text.slice(0, 3000))],
-          };
-          await normalizeObservation(o.id, rule, lease);
-          rules.push(rule);
-        } catch (error) {
-          if (error instanceof LeaseLost) throw error;
-          lease?.signal.throwIfAborted();
-          if (error instanceof ProviderAccessError) {
-            accessFailure = error;
-            return;
           }
-          errors.push(
-            `${retailers[retailer].name}: shipping policy unavailable. ${message(error)}`,
-          );
-        }
-      };
-      // Policy extraction is independent of product extraction. Do not add a
-      // further model timeout after all product requests have finished.
-      await Promise.all([collectProducts(), collectPolicy()]);
-    }),
+        };
+        // Policy extraction is independent of product extraction. Do not add a
+        // further model timeout after all product requests have finished.
+        await Promise.all([collectProducts(), collectPolicy()]);
+      }),
   );
   await supplements;
   if (accessFailure) throw accessFailure;

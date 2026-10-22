@@ -13,6 +13,7 @@ export async function requestApi(
   path: string,
   token: string,
   init: RequestInit = {},
+  timeoutMs = 6000,
 ) {
   if (staticSite && !apiBase)
     throw new Error(
@@ -22,7 +23,7 @@ export async function requestApi(
   try {
     response = await fetch(`${apiBase}${path}`, {
       ...init,
-      signal: AbortSignal.timeout(6000),
+      signal: AbortSignal.timeout(timeoutMs),
       credentials: "omit",
       headers: {
         "Content-Type": "application/json",
@@ -32,7 +33,7 @@ export async function requestApi(
     });
   } catch {
     throw new Error(
-      "The server did not respond within six seconds. Saved work is kept; use Resume before starting another collection.",
+      `The server did not respond within ${timeoutMs / 1000} seconds. Saved work is kept; use Resume before starting another collection.`,
     );
   }
   if (!response.headers.get("content-type")?.includes("application/json"))

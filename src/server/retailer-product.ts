@@ -13,6 +13,7 @@ export const hasPublishedQuantityPricing = (text: string) =>
 export function retailerProduct(
   text: string,
   retailer: Retailer,
+  allowGeneric = false,
 ): ProductExtraction | null {
   const main = extractionContent(text);
   const heading = /^# ([^\n]+)$/m.exec(main);
@@ -25,7 +26,7 @@ export function retailerProduct(
       : /\b400\b/.test(title) && /breadboard/i.test(title)
         ? "breadboard400"
         : null;
-  if (!model) return null;
+  if (!model && !allowGeneric) return null;
   const header = main
     .split(
       /\n(?:Buy it with|Didn.t find what|Have a Bulk Order|## Bulk Order)/i,
@@ -54,19 +55,26 @@ export function retailerProduct(
         /#{1,5}\s*\*?\*?(?:Package Includes|What['’]s in the Box)\s*:?\*?\*?\s*/i,
       )[1]
       ?.split(/\n#{1,5}\s|\n---/)[0] || "";
-  const packageLine = packageSection
-    .split("\n")
-    .find(
-      (line) =>
-        /^\s*\*?\s*\d+\s*[x×]\s+/i.test(line) &&
-        (canonical(line).includes(canonical(model)) ||
-          (model === "breadboard400" &&
-            /400/.test(line) &&
-            /breadboard/i.test(line))),
-    );
-  const units = packageLine
-    ? Number(/(\d+)\s*[x×]/i.exec(packageLine)![1])
-    : null;
+  const packageLine = packageSection.split("\n").find(
+    (line) =>
+      /^\s*\*?\s*\d+\s*[x×]\s+/i.test(line) &&
+      ((model
+        ? canonical(line).includes(canonical(model))
+        : title
+            .toLowerCase()
+            .split(/[^a-z0-9-]+/)
+            .filter((word) => word.length >= 4)
+            .some((word) => line.toLowerCase().includes(word))) ||
+        (model === "breadboard400" &&
+          /400/.test(line) &&
+          /breadboard/i.test(line))),
+  );
+  const titlePack = allowGeneric ? /\bpack\s+of\s+(\d+)\b/i.exec(title) : null;
+  const units = titlePack
+    ? Number(titlePack[1])
+    : packageLine
+      ? Number(/(\d+)\s*[x×]/i.exec(packageLine)![1])
+      : null;
   const tax = /Incl\. GST(?: \(No Hidden Charges\))?/.exec(header);
   const wholePoints = /\|\s*Number of Points\s*\|\s*(\d+)\s*\|/i.exec(main);
   const specs: ProductExtraction["specs"] = wholePoints
@@ -118,8 +126,11 @@ export function retailerProduct(
       : null;
   if (availablePacks !== null)
     support.push({ field: "availablePacks", excerpt: stockMatch![0] });
-  if (units && packageLine)
-    support.push({ field: "unitsPerPack", excerpt: packageLine });
+  if (units && (titlePack || packageLine))
+    support.push({
+      field: "unitsPerPack",
+      excerpt: titlePack ? title : packageLine!,
+    });
   if (tax) support.push({ field: "taxStatus", excerpt: tax[0] });
   if (minPacks) support.push({ field: "minPacks", excerpt: control });
   if (multiplePacks) support.push({ field: "multiplePacks", excerpt: control });

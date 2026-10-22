@@ -50,8 +50,17 @@ export function BasketPlan({ plan, demo }: { plan: Plan; demo: boolean }) {
                   {line.offer.title.replace(/^\[Synthetic\]\s*/, "")} ↗
                 </a>
                 <small>
-                  {line.packs} × {line.offer.unitsPerPack}-unit pack · need{" "}
-                  {line.requiredUnits}, receive {line.purchasedUnits}
+                  {line.quantityUnit === "packs" ? (
+                    <>
+                      {line.packs} retailer packs · requested{" "}
+                      {line.requiredUnits} packs
+                    </>
+                  ) : (
+                    <>
+                      {line.packs} × {line.offer.unitsPerPack}-unit pack · need{" "}
+                      {line.requiredUnits}, receive {line.purchasedUnits}
+                    </>
+                  )}
                 </small>
               </div>
               <strong>{money(line.payablePaise)}</strong>
@@ -157,6 +166,13 @@ export default function QuoteResults({
         {result.plans.filter((plan) => plan.verified).length}{" "}
         {demo ? "complete sample plans" : "verified plans"}
       </p>
+      {result.comparisonLimited && (
+        <p className="notice warning">
+          Large comparison: checking a bounded item-cost shortlist plus complete
+          single-retailer baskets. This is not an exhaustive search or a
+          guarantee of the global lowest cost.
+        </p>
+      )}
 
       {estimate && (
         <article className="recommendation" style={{ padding: "1.5rem" }}>

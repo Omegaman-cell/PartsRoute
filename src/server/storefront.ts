@@ -13,6 +13,7 @@ const Integer = z.number().int().nonnegative();
 const Variant = z.object({
   id: z.number().int().positive(),
   sku: z.string(),
+  title: z.string().optional(),
   price: Integer,
   available: z.boolean(),
   quantity_rule: z.object({
@@ -105,7 +106,11 @@ export class StorefrontClient {
       const variants =
         products
           .get(line.offer.id)
-          ?.variants.filter((variant) => variant.sku === line.offer.sku) ?? [];
+          ?.variants.filter((variant) =>
+            line.offer.variantId !== undefined
+              ? variant.id === line.offer.variantId
+              : variant.sku === line.offer.sku,
+          ) ?? [];
       if (variants.length !== 1 || !variants[0].available)
         throw new Error("Storefront variant is unavailable or ambiguous");
       return { line, variant: variants[0] };
@@ -199,8 +204,10 @@ export function storefrontOrders(
   product: StoreProduct,
   source: Evidence,
 ): Offer {
-  const variants = product.variants.filter(
-    (variant) => variant.sku === offer.sku,
+  const variants = product.variants.filter((variant) =>
+    offer.variantId !== undefined
+      ? variant.id === offer.variantId
+      : variant.sku === offer.sku,
   );
   if (
     variants.length !== 1 ||

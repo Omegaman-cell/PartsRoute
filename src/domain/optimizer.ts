@@ -22,17 +22,18 @@ export function tax(amount: number, bps: number): number {
   return Number((BigInt(amount) * BigInt(bps) + 5000n) / 10000n);
 }
 export function priceLine(part: PartRequest, offer: Offer): LineCost | null {
+  const unitsPerPack = part.quantityUnit === "packs" ? 1 : offer.unitsPerPack;
   if (
     !eligible(part, offer) ||
     offer.stock !== "in_stock" ||
-    !offer.unitsPerPack ||
+    !unitsPerPack ||
     !offer.minPacks ||
     !offer.multiplePacks
   )
     return null;
   const minimum =
     Math.ceil(
-      Math.max(Math.ceil(part.quantity / offer.unitsPerPack), offer.minPacks) /
+      Math.max(Math.ceil(part.quantity / unitsPerPack), offer.minPacks) /
         offer.multiplePacks,
     ) * offer.multiplePacks;
   if (offer.availablePacks !== null && minimum > offer.availablePacks)
@@ -82,7 +83,8 @@ export function priceLine(part: PartRequest, offer: Offer): LineCost | null {
     offer,
     requiredUnits: part.quantity,
     packs,
-    purchasedUnits: packs * offer.unitsPerPack,
+    purchasedUnits: packs * unitsPerPack,
+    quantityUnit: part.quantityUnit,
     itemsPaise,
     addedTaxPaise,
     beforeTaxPaise,
@@ -95,7 +97,7 @@ export function basketKey(
   lines: LineCost[],
 ): string {
   return JSON.stringify([
-    "basket-v2",
+    "basket-v3",
     retailer,
     pincode,
     [...lines]
@@ -103,6 +105,7 @@ export function basketKey(
       .map((line) => ({
         id: line.offer.id,
         sku: line.offer.sku,
+        variantId: line.offer.variantId ?? null,
         url: line.offer.url,
         packs: line.packs,
         unitsPerPack: line.offer.unitsPerPack,
@@ -176,12 +179,46 @@ export function buildPlans(
   );
   if (choices.some((c) => !c.length)) return [];
   let combinations: LineCost[][] = [[]];
-  for (const alternatives of choices)
+  for (const alternatives of choices) {
     combinations = combinations.flatMap((combo) =>
       alternatives.map((line) => [...combo, line]),
     );
-  if (combinations.length > 1024)
-    throw new Error("Too many candidate combinations");
+    if (combinations.length > 1024) {
+      // Keep the two complete-store paths as well as a bounded item-cost
+      // shortlist. Large comparisons explicitly disclose this search bound.
+      const itemCost = (lines: LineCost[]) =>
+        lines.reduce(
+          (sum, line) => sum + (line.payablePaise ?? line.itemsPaise),
+          0,
+        );
+      const completeStore = (["robu", "robocraze"] as const).flatMap(
+        (retailer) =>
+          combinations
+            .filter((lines) =>
+              lines.every((line) => line.offer.retailer === retailer),
+            )
+            .sort((a, b) => itemCost(a) - itemCost(b))
+            .slice(0, 1),
+      );
+      combinations.sort(
+        (a, b) =>
+          a.reduce(
+            (sum, line) => sum + (line.payablePaise ?? line.itemsPaise),
+            0,
+          ) -
+          b.reduce(
+            (sum, line) => sum + (line.payablePaise ?? line.itemsPaise),
+            0,
+          ),
+      );
+      combinations = [
+        ...new Set([
+          ...completeStore,
+          ...combinations.slice(0, 1024 - completeStore.length),
+        ]),
+      ];
+    }
+  }
   const plans = combinations.map((lines, index): Plan => {
     const unresolved: string[] = [];
     const baskets = [...new Set(lines.map((l) => l.offer.retailer))].map(
