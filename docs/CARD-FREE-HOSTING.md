@@ -12,10 +12,16 @@ Keep Render on a Free instance and Supabase on its Free plan. Do not use
 Supply the existing TinyFish, Gemini and team access values through Render's
 runtime environment variables. Never put these values in the Blueprint, Git
 repository, build arguments or browser bundle. Configure `DATABASE_URL` with the
-Supabase **session pooler** URI, using PostgreSQL TLS. Session pooling preserves
-the session advisory locks used by migrations. A transaction pooler is not a
-substitute for this migration connection. `RENDER_EXTERNAL_URL` is used by the
+Supabase **session pooler** URI with `?sslmode=verify-full`. This supports the
+persistent server's IPv4 connections. Set `NODE_EXTRA_CA_CERTS` to
+`certs/supabase-prod-ca-2021.crt`, as the Blueprint does, so Node verifies
+Supabase's certificate authority and the pooler's hostname. `RENDER_EXTERNAL_URL` is used by the
 existing origin checks for the app's generated domain.
+
+The public CA certificate comes from the [official Supabase dashboard
+configuration](https://github.com/supabase/supabase/blob/master/apps/studio/hooks/custom-content/custom-content.json):
+`https://supabase-downloads.s3-ap-southeast-1.amazonaws.com/prod/ssl/prod-ca-2021.crt`.
+It contains no credentials. Keep database passwords and API keys in host secrets.
 
 `node scripts/start-hosted.mjs` applies migrations before starting either
 service, starts the web process on Render's `PORT`, and starts the unchanged
