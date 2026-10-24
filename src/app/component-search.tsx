@@ -59,10 +59,6 @@ export default function ComponentSearch({
   return (
     <section className="component-search" aria-label="Live component search">
       <h3>Find any component</h3>
-      <p className="muted">
-        Search actual retailer listings by name, part number or specification.
-        Add as many component lines as your build needs.
-      </p>
       <form
         onSubmit={(event) => {
           event.preventDefault();
@@ -108,16 +104,9 @@ export default function ComponentSearch({
         </fieldset>
       </form>
       {!token && (
-        <p className="source-note">
-          Enter your team token above to search. No provider keys are needed in
-          the browser.
-        </p>
+        <p className="source-note">Enter your team token to search.</p>
       )}
-      {busy && (
-        <p role="status">
-          Reading retailer search pages and current product variants…
-        </p>
-      )}
+      {busy && <p role="status">Searching…</p>}
       {error && (
         <p className="notice warning" role="alert">
           {error}
@@ -126,15 +115,12 @@ export default function ComponentSearch({
       {result && (
         <div>
           <p className="source-note">
-            Results for “{result.query}” · checked {when(result.observedAt)}. Up
-            to 10 suggestions per retailer; refine your query for other
-            products. Listing prices are per retailer pack; tax and delivery are
-            checked when collecting a quote.
+            “{result.query}” · {result.products.length} results ·{" "}
+            {when(result.observedAt)}
           </p>
           {result.products.length === 0 && (
             <p role="status">
-              No usable listings returned. Try a more specific part number or
-              another retailer; failed searches are listed below.
+              No results. Try another part number or retailer.
             </p>
           )}
           <div className="search-results">
@@ -220,7 +206,7 @@ export default function ComponentSearch({
             </div>
           )}
           <details>
-            <summary>Search sources</summary>
+            <summary>Sources</summary>
             {result.sources.map((source) => (
               <p key={source.url}>
                 <a href={source.url} target="_blank" rel="noreferrer">
@@ -228,9 +214,6 @@ export default function ComponentSearch({
                 </a>
               </p>
             ))}
-            <small>
-              Original responses retained under search ID {result.id}.
-            </small>
           </details>
         </div>
       )}

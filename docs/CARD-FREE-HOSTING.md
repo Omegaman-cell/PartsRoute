@@ -48,11 +48,30 @@ Free plan includes a 500 MB database, and projects with low activity can pause
 after seven days. A paused database must be restored through Supabase. This is a
 free demo deployment, not a guarantee of continuous production availability.
 
+## Published deployment and verification
+
+The application is published at [partsroute.onrender.com](https://partsroute.onrender.com)
+on Render Free in Singapore, using the PartsRoute Supabase Free project in Mumbai.
+API keys and the database password are configured only in the host environment.
+The existing private team token authorizes live mode. Deployment is manual from
+the repository's `main` branch; pushing documentation does not restart a demo.
+
+On 24 October 2026, hosted checks confirmed database and worker readiness,
+all nine HTTP smoke checks, protected live endpoints and browser-origin checks.
+A fresh `sensor` search returned ten selectable real Robocraze products in
+1.44 seconds. A four-line quote to pincode 110034 matched all four selected
+variants, produced one comparison plan, and finished in 28.09 seconds. Its ten
+original observations and saved result were retrieved again through the hosted
+API. Shipping verification timed out, so the quote correctly remained partial;
+this is not evidence of a verified delivered total or a ten-second result.
+
 The startup change passed the existing 145-test suite. An isolated local
 qualification ran migrations against the test database, confirmed web/worker
 readiness, killed only the test worker, and verified that the supervisor stopped
-the test web process and exited with code 1. Hosted functionality and memory
-limits remain unverified until the provider connections and deployment complete.
+the test web process and exited with code 1. The deployed runtime commit
+`eeb2c77` also passed GitHub's Validate workflow. The hosted quote check exercised
+both web and worker within the free instance, but does not establish capacity
+for concurrent public traffic.
 
 Sources: [Render free limits](https://render.com/docs/free),
 [Supabase pricing](https://supabase.com/pricing),

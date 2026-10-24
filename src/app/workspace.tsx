@@ -544,18 +544,14 @@ export default function Workspace() {
               {!liveAvailable && <span className="small-tag">Setup</span>}
             </button>
           </div>
-          <span className="toolbar-note">
-            INR · India · No purchases or payments
-          </span>
+          <span className="toolbar-note">INR · India</span>
         </div>
         {mode === "demo" && (
           <div className="demo-banner">
             <Icon name="info" />
             <span>
-              <strong>Calculator example.</strong> Edit the quantities to see
-              how shipping changes the best basket. Prices and shipping are
-              synthetic. This runs instantly with no live fetching or pincode
-              lookup.
+              <strong>Sample data.</strong> Change quantities to compare
+              baskets.
             </span>
           </div>
         )}
@@ -568,8 +564,7 @@ export default function Workspace() {
           <div className="demo-banner" role="status">
             <Icon name="info" />
             <span>
-              <strong>Temporary live server.</strong> The team computer must
-              stay online. Collection time depends on retailer availability.
+              <strong>Temporary server.</strong> Keep the host computer online.
             </span>
           </div>
         )}
@@ -590,14 +585,14 @@ export default function Workspace() {
                     <h2>
                       {!liveAvailable
                         ? "Connect a server to collect live offers"
-                        : "Check the live service"}
+                        : "Team access"}
                     </h2>
                   </div>
                   <span
                     className={`connection-state ${status?.ready ? "ready" : ""}`}
                   >
                     {status?.ready
-                      ? "Worker ready"
+                      ? "Connected"
                       : !liveAvailable
                         ? "Server not connected"
                         : status
@@ -607,11 +602,7 @@ export default function Workspace() {
                 </div>
                 {!liveAvailable ? (
                   <>
-                    <p>
-                      This hosted demo runs the sample calculator. Live quotes
-                      need the server application, a database and a worker.
-                      TinyFish and AI provider keys belong on that server.
-                    </p>
+                    <p>Connect a backend to enable live quotes.</p>
                     <a
                       className="setup-link"
                       href={`${repository}/blob/main/docs/LIVE-SETUP.md`}
@@ -623,11 +614,6 @@ export default function Workspace() {
                   </>
                 ) : (
                   <>
-                    <p>
-                      Collect current retailer prices and check the complete
-                      basket. The timer includes product and shipping
-                      verification.
-                    </p>
                     {apiBase && (
                       <p className="source-note">
                         Connected server:{" "}
@@ -652,7 +638,7 @@ export default function Workspace() {
                             setToken(event.target.value);
                             setStatus(null);
                           }}
-                          placeholder="Enter the server’s team token"
+                          placeholder="Team token"
                         />
                       </label>
                       <button
@@ -664,19 +650,9 @@ export default function Workspace() {
                         {checking ? "Checking…" : "Check connection"}
                       </button>
                     </div>
-                    <p className="source-note">
-                      The token stays in this tab. API keys are never entered
-                      here.
-                    </p>
                     <details className="token-help">
                       <summary>Where do I find the team token?</summary>
-                      <p>
-                        Local server: copy the value of APP_ACCESS_TOKEN from
-                        your private .env.local file. Hosted server: find
-                        APP_ACCESS_TOKEN in the web service’s Environment
-                        settings. This is your PartsRoute access password,
-                        separate from the AI provider and TinyFish keys.
-                      </p>
+                      <p>Ask your team for the access token.</p>
                     </details>
                     {status && (
                       <ul className="status-checks">
@@ -689,7 +665,7 @@ export default function Workspace() {
                             </span>
                             <div>
                               <strong>{check.name}</strong>
-                              <span>{check.detail}</span>
+                              {!check.ok && <span>{check.detail}</span>}
                             </div>
                           </li>
                         ))}
@@ -747,15 +723,13 @@ export default function Workspace() {
                 )}
                 {mode === "demo" && (
                   <p className="source-note">
-                    This sample contains three synthetic components. Choose{" "}
                     <button
                       className="text-button"
                       type="button"
                       onClick={() => switchMode("live")}
                     >
-                      Live quote to search and add any component ↗
+                      Search components in Live quote ↗
                     </button>
-                    .
                   </p>
                 )}
                 <form
@@ -794,10 +768,6 @@ export default function Workspace() {
                                   Selected retailer product ↗
                                 </a>
                               ))}
-                              <p className="source-note">
-                                Exact listing selected. Additional
-                                specifications below must still be verified.
-                              </p>
                             </div>
                           ) : (
                             <select
@@ -887,8 +857,7 @@ export default function Workspace() {
                                       Retailer packs, as listed
                                     </option>
                                     <option value="units">
-                                      Individual units (requires verified pack
-                                      contents)
+                                      Individual units
                                     </option>
                                   </select>
                                 </label>
@@ -987,10 +956,6 @@ export default function Workspace() {
                                 />
                                 Allow a different model after I confirm it
                               </label>
-                              <p className="source-note">
-                                Required specifications must still match. A
-                                confidence score cannot override a conflict.
-                              </p>
                             </div>
                           </details>
                         </div>
@@ -1051,11 +1016,7 @@ export default function Workspace() {
                           }}
                         />
                       </label>
-                      <p>
-                        {mode === "demo"
-                          ? "Sample shipping stays fixed for any example pincode. Use Live quote for a real delivery check."
-                          : "One destination for every retailer basket."}
-                      </p>
+                      <p>{mode === "demo" ? "Sample delivery rates" : ""}</p>
                     </div>
                     <button
                       className="primary"
@@ -1070,7 +1031,7 @@ export default function Workspace() {
                         : mode === "demo"
                           ? "Calculate sample baskets"
                           : token
-                            ? "Collect & compare fresh offers"
+                            ? "Compare live prices"
                             : "Enter team token to compare"}
                       <Icon name="arrow" />
                     </button>
@@ -1084,9 +1045,6 @@ export default function Workspace() {
                         >
                           View saved observations ↗
                         </button>
-                        <span>
-                          Separate cache-only view. Makes no new API calls.
-                        </span>
                       </div>
                     )}
                     {mode === "live" && !token && (
@@ -1104,25 +1062,6 @@ export default function Workspace() {
                     )}
                   </fieldset>
                 </form>
-                <details className="coverage">
-                  <summary>Retailer coverage & limits</summary>
-                  <p>
-                    <strong>Robu · Robocraze</strong> — adapters implemented;
-                    complete live baskets remain unqualified. Product mismatches
-                    and shipping gaps are shown rather than filled in.
-                  </p>
-                  <p>
-                    Evelta is research only. Amazon and Flipkart are planned;
-                    seller and variant verification are still needed.
-                  </p>
-                  <a
-                    href={`${repository}/blob/main/docs/FEASIBILITY.md`}
-                    target="_blank"
-                    rel="noreferrer"
-                  >
-                    Read retailer feasibility notes ↗
-                  </a>
-                </details>
               </section>
               <section
                 className="panel results-panel"
@@ -1136,16 +1075,15 @@ export default function Workspace() {
                       <strong>{phase || "Checking the saved quote…"}</strong>
                       <p>
                         {mode === "live"
-                          ? "Fresh collection is running in the background. Saved results appear as they arrive. Resume retrieves this same job."
-                          : "Calculating complete assignments from the synthetic fixture."}
+                          ? "Results appear as they arrive."
+                          : "Comparing baskets…"}
                       </p>
                     </div>
                   </div>
                 )}
                 {mode === "live" && responseMs !== null && (
                   <p className="response-note" role="status">
-                    Saved comparison · {(responseMs / 1000).toFixed(2)} s · No
-                    new API calls
+                    Saved comparison · {(responseMs / 1000).toFixed(2)} s
                   </p>
                 )}
                 {mode === "live" && collectionClock && (
@@ -1154,7 +1092,7 @@ export default function Workspace() {
                       {collectionClock.recovered
                         ? collectionClock.finished
                           ? (job?.attempts ?? 1) > 1
-                            ? "Saved job lifetime (includes recovery pauses)"
+                            ? "Total elapsed time"
                             : "Saved quote duration"
                           : "Resumed collection"
                         : "Fresh collection"}{" "}
@@ -1174,7 +1112,7 @@ export default function Workspace() {
                       {collectionClock.finished &&
                         (job?.status === "complete" && result?.recommendedId
                           ? " · Verified plan returned"
-                          : " · No complete verified plan returned")}
+                          : " · Partial result")}
                     </p>
                   </>
                 )}
@@ -1206,9 +1144,9 @@ export default function Workspace() {
                       <p>
                         {mode === "live"
                           ? job?.status === "failed"
-                            ? "Review the error above. Any pages already collected remain saved with this quote; open Evidence to inspect them before retrying."
-                            : "The main button collects current retailer data. Saved observations are available separately and are never counted as a fresh quote."
-                          : "Search real retailer products and add them to your parts list to compare basket costs."}
+                            ? "Check the error above or retry this quote."
+                            : "Add components and compare prices for your pincode."
+                          : "Add components to compare basket costs."}
                       </p>
                       <div className="empty-breakdown">
                         <div>
@@ -1224,11 +1162,6 @@ export default function Workspace() {
                           <span>One charge per retailer basket</span>
                         </div>
                       </div>
-                      <p className="source-note">
-                        {mode === "live"
-                          ? "A delivered total is recommended only after product requirements and exact-basket shipping have been checked."
-                          : "The sample is a worked arithmetic example. Live recommendations require source evidence and verified shipping."}
-                      </p>
                     </div>
                   )
                 )}

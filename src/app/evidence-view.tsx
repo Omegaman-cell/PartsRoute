@@ -1,4 +1,4 @@
-import { repository, when } from "./api-client";
+import { when } from "./api-client";
 
 export type EvidenceData = {
   observations: {
@@ -48,30 +48,10 @@ export default function EvidenceView({
           </button>
         )}
       </div>
-      <p>
-        Live quotes retain retailer API responses, linked datasheet text,
-        TinyFish responses, normalized observations, browser run IDs and
-        reported model usage. Guest-cart cookies and tokens are excluded.
-      </p>
       {!jobId && !data && !busy ? (
         <div className="empty-panel">
           <h3>No live quote selected</h3>
-          <p>
-            Sample calculations use synthetic data and have no TinyFish run.
-            Start a live quote on the server deployment to inspect its evidence
-            here.
-          </p>
-          <a
-            href={`${repository}/tree/main/docs/evidence`}
-            target="_blank"
-            rel="noreferrer"
-          >
-            Read saved feasibility observations ↗
-          </a>
-          <p className="source-note">
-            These earlier captures are research records, not a live run of this
-            site.
-          </p>
+          <p>Run a live quote to see its sources.</p>
         </div>
       ) : (
         <p className="source-note">
@@ -88,10 +68,7 @@ export default function EvidenceView({
         <>
           <h3>TinyFish browser runs</h3>
           {!data.operations.length && (
-            <p className="muted">
-              No basket check has started. Missing product or price details can
-              prevent verification.
-            </p>
+            <p className="muted">No basket checks yet.</p>
           )}
           {data.operations.map((operation) => (
             <div className="run-row" key={operation.operation_key}>
@@ -135,10 +112,6 @@ export default function EvidenceView({
             </details>
           ))}
           <h3>Reported usage</h3>
-          <p className="source-note">
-            Unreported usage remains unknown. Token counts are not a monetary
-            cost estimate.
-          </p>
           <div className="table-scroll">
             <table>
               <thead>

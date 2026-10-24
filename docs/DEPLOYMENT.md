@@ -2,7 +2,7 @@
 
 PartsRoute requires **two long-running Node services and one persistent PostgreSQL database** for live mode. Deploy the web service and worker from the same commit. Do not run the worker inside a request handler or on short-lived serverless functions.
 
-For the card-free demo, use [CARD-FREE-HOSTING.md](CARD-FREE-HOSTING.md) and the default `render.yaml`. It shares one free instance between web and worker and uses external PostgreSQL. `render.paid.yaml` is the optional separate-service paid configuration. [LIVE-SETUP.md](LIVE-SETUP.md) covers local Compose. Hosted services have not yet been provisioned.
+The full app is live at [partsroute.onrender.com](https://partsroute.onrender.com). For the card-free demo, use [CARD-FREE-HOSTING.md](CARD-FREE-HOSTING.md) and the default `render.yaml`. It shares one free instance between web and worker and uses Supabase PostgreSQL. `render.paid.yaml` is the optional separate-service paid configuration. [LIVE-SETUP.md](LIVE-SETUP.md) covers local Compose.
 
 ## GitHub Pages: interactive saved-data demo
 
