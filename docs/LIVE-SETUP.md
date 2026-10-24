@@ -80,4 +80,4 @@ If a retailer requires names, a street address, login or checkout submission, th
 
 ## Optional hosting later
 
-`render.yaml` and deployment documentation are preparation only; no paid resources were provisioned. GitHub Pages builds with `pnpm build:pages` are separate static exports. A public backend origin is optional and must be configured at Pages build time; provider keys remain server-only. Historical temporary tunnel addresses are not a current deployment.
+The default `render.yaml` prepares a free shared web/worker instance with an external database; see [card-free hosting](CARD-FREE-HOSTING.md) for its limits. `render.paid.yaml` is the optional paid separate-service setup. Neither has been provisioned yet. GitHub Pages builds with `pnpm build:pages` are separate static exports. A public backend origin is optional and must be configured at Pages build time; provider keys remain server-only. Historical temporary tunnel addresses are not a current deployment.
